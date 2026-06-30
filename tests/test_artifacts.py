@@ -1,3 +1,5 @@
+import hashlib
+
 from flashinfer.artifacts import (
     ArtifactPath,
     get_available_cubin_files,
@@ -6,7 +8,23 @@ from flashinfer.artifacts import (
 
 import responses
 
+from flashinfer.jit import cubin_loader
 from flashinfer.jit.cubin_loader import safe_urljoin
+
+
+def test_get_artifact_from_packaged_csrc(tmp_path, monkeypatch):
+    payload = b"packaged cubin"
+    sha256 = hashlib.sha256(payload).hexdigest()
+    csrc_dir = tmp_path / "csrc"
+    artifact = csrc_dir / "xqa/cubin/test.cubin"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(payload)
+
+    monkeypatch.setattr(cubin_loader, "FLASHINFER_CSRC_DIR", csrc_dir)
+    monkeypatch.setattr(cubin_loader, "FLASHINFER_CUBIN_DIR", tmp_path / "cache")
+    monkeypatch.setenv("FLASHINFER_NO_DOWNLOAD", "1")
+
+    assert cubin_loader.get_artifact("xqa/cubin/test.cubin", sha256) == payload
 
 
 def test_sanity_check_urllib_behavior():

@@ -88,7 +88,33 @@ static_assert(SPEC_DEC, "SPEC_Q_SEQ_LEN should only be used when SPEC_DEC is ena
 #define CACHE_ELEM_ENUM 2
 #endif
 
-#if CACHE_ELEM_ENUM == 3
+#ifndef K_CACHE_ELEM_ENUM
+#define K_CACHE_ELEM_ENUM CACHE_ELEM_ENUM
+#endif
+
+#ifndef V_CACHE_ELEM_ENUM
+#define V_CACHE_ELEM_ENUM CACHE_ELEM_ENUM
+#endif
+
+#if K_CACHE_ELEM_ENUM != V_CACHE_ELEM_ENUM
+#define MIXED_KV_CACHE 1
+#else
+#define MIXED_KV_CACHE 0
+#endif
+
+#if K_CACHE_ELEM_ENUM == 3
+#define ENABLE_4BIT_K_CACHE 1
+#else
+#define ENABLE_4BIT_K_CACHE 0
+#endif
+
+#if V_CACHE_ELEM_ENUM == 3
+#define ENABLE_4BIT_V_CACHE 1
+#else
+#define ENABLE_4BIT_V_CACHE 0
+#endif
+
+#if ENABLE_4BIT_K_CACHE || ENABLE_4BIT_V_CACHE
 #define ENABLE_4BIT_KV_CACHE 1
 #else
 #define ENABLE_4BIT_KV_CACHE 0

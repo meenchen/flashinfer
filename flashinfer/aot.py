@@ -426,6 +426,19 @@ def gen_xqa(
             output_dtype=input_type,
         )
 
+    if has_sm100:
+        yield gen_xqa_module(
+            input_dtype=torch.bfloat16,
+            kv_cache_dtype=torch.uint8,
+            page_size=16,
+            head_dim=128,
+            head_group_ratio=4,
+            use_sliding_window=False,
+            output_dtype=torch.bfloat16,
+            mixed_kv=True,
+            use_packaged_mixed_cubin=True,
+        )
+
     if has_sm120 or has_sm121:
         for token_per_page in token_per_page_:
             yield gen_xqa_module_mla(

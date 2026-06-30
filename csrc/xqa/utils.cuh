@@ -724,6 +724,12 @@ __device__ __host__ inline void assertClose(half a, half b, float threshold = 0.
   assertClose(__half2float(a), __half2float(b), threshold);
 }
 
+__device__ inline uint32_t convertF16x2WordToBF16x2(uint32_t data) {
+  __half2 fp16 = reinterpret_cast<__half2&>(data);
+  __nv_bfloat162 bf16 = __float22bfloat162_rn(__half22float2(fp16));
+  return reinterpret_cast<uint32_t&>(bf16);
+}
+
 template <typename InputElem, typename CacheElem>
 __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16(uint32_t i8data) {
   static_assert(mha::is_same_v<InputElem, half> || mha::is_same_v<InputElem, __nv_bfloat16>,
@@ -732,8 +738,8 @@ __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16(uint32_t i8data) {
   Vec<uint32_t, 2> ret;
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
   if constexpr (mha::is_same_v<InputElem, half> && mha::is_same_v<CacheElem, __nv_fp8_e4m3>) {
-    uint16_t(&src)[2] = reinterpret_cast<uint16_t(&)[2]>(i8data);
-    uint32_t(&dst)[2] = reinterpret_cast<uint32_t(&)[2]>(ret);
+    uint16_t (&src)[2] = reinterpret_cast<uint16_t (&)[2]>(i8data);
+    uint32_t (&dst)[2] = reinterpret_cast<uint32_t (&)[2]>(ret);
     asm("{\n"
         "cvt.rn.f16x2.e4m3x2 %0, %2;\n"
         "cvt.rn.f16x2.e4m3x2 %1, %3;\n"
@@ -752,13 +758,36 @@ __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16(uint32_t i8data) {
   return ret;
 }
 
+template <>
+__device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<__nv_bfloat16, __nv_fp8_e4m3>(
+    uint32_t i8data) {
+  Vec<uint32_t, 2> fp16;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  uint16_t (&src)[2] = reinterpret_cast<uint16_t (&)[2]>(i8data);
+  asm("{\n"
+      "cvt.rn.f16x2.e4m3x2 %0, %2;\n"
+      "cvt.rn.f16x2.e4m3x2 %1, %3;\n"
+      "}"
+      : "=r"(fp16[0]), "=r"(fp16[1])
+      : "h"(src[0]), "h"(src[1]));
+#else
+  __nv_fp8_e4m3 const(&src)[4] = reinterpret_cast<__nv_fp8_e4m3 const(&)[4]>(i8data);
+  half(&dst)[4] = reinterpret_cast<half(&)[4]>(fp16);
+#pragma unroll
+  for (uint32_t i = 0; i < 4; i++) {
+    dst[i] = half(src[i]);
+  }
+#endif
+  return Vec<uint32_t, 2>{convertF16x2WordToBF16x2(fp16[0]), convertF16x2WordToBF16x2(fp16[1])};
+}
+
 #if ENABLE_4BIT_KV_CACHE
 template <>
 __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<half, __nv_fp4_e2m1>(uint32_t i8data) {
   Vec<uint32_t, 2> ret;
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t src = i8data | (i8data >> 4);
-  uint32_t(&dst)[2] = reinterpret_cast<uint32_t(&)[2]>(ret);
+  uint32_t (&dst)[2] = reinterpret_cast<uint32_t (&)[2]>(ret);
   asm("{\n"
       ".reg .b8 byte0, byte2;\n"
       "mov.b32 {byte0, _, byte2, _}, %2;\n"
@@ -783,7 +812,7 @@ __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<__nv_bfloat16, __nv_fp
 #if (defined __CUDACC_VER_MAJOR__) && (defined __CUDACC_VER_MINOR__) && \
     ((__CUDACC_VER_MAJOR__ > 13) || ((__CUDACC_VER_MAJOR__ == 13) && (__CUDACC_VER_MINOR__ >= 2)))
   uint32_t src = i8data | (i8data >> 4);
-  uint32_t(&dst)[2] = reinterpret_cast<uint32_t(&)[2]>(ret);
+  uint32_t (&dst)[2] = reinterpret_cast<uint32_t (&)[2]>(ret);
   asm("{\n"
       ".reg .b8 byte0, byte2;\n"
       "mov.b32 {byte0, _, byte2, _}, %2;\n"
@@ -795,21 +824,17 @@ __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<__nv_bfloat16, __nv_fp
 #else
   // Fallback: convert e2m1 -> fp16 -> bf16
   uint32_t src = i8data | (i8data >> 4);
-  __half halfData[4];
-  uint32_t(&dst)[2] = reinterpret_cast<uint32_t(&)[2]>(halfData);
+  uint32_t fp16[2];
   asm("{\n"
       ".reg .b8 byte0, byte2;\n"
       "mov.b32 {byte0, _, byte2, _}, %2;\n"
       "cvt.rn.f16x2.e2m1x2 %0, byte0;\n"
       "cvt.rn.f16x2.e2m1x2 %1, byte2;\n"
       "}"
-      : "=r"(dst[0]), "=r"(dst[1])
+      : "=r"(fp16[0]), "=r"(fp16[1])
       : "r"(src));
-  auto bf16Data = reinterpret_cast<__nv_bfloat16(&)[4]>(ret);
-#pragma unroll
-  for (uint32_t ii = 0; ii < 4; ii++) {
-    bf16Data[ii] = __nv_bfloat16(halfData[ii]);
-  }
+  ret[0] = convertF16x2WordToBF16x2(fp16[0]);
+  ret[1] = convertF16x2WordToBF16x2(fp16[1]);
 #endif
 #else
   assert(!"need arch >= 1000");
@@ -827,7 +852,7 @@ __device__ inline Vec<uint32_t, 2> convertVCacheWordToF16(uint32_t i8data) {
   Vec<uint32_t, 2> ret;
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
   if constexpr (mha::is_same_v<InputElem, half> && mha::is_same_v<CacheElem, __nv_fp8_e4m3>) {
-    uint32_t(&dst)[2] = reinterpret_cast<uint32_t(&)[2]>(ret);
+    uint32_t (&dst)[2] = reinterpret_cast<uint32_t (&)[2]>(ret);
     asm("{\n"
         ".reg .b32 dst0;\n"
         ".reg .b32 dst1;\n"
@@ -855,6 +880,35 @@ __device__ inline Vec<uint32_t, 2> convertVCacheWordToF16(uint32_t i8data) {
   }
 
   return ret;
+}
+
+template <>
+__device__ inline Vec<uint32_t, 2> convertVCacheWordToF16<__nv_bfloat16, __nv_fp8_e4m3>(
+    uint32_t i8data) {
+  Vec<uint32_t, 2> fp16;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  asm("{\n"
+      ".reg .b32 src;\n"
+      ".reg .b16 src0, src1;\n"
+      "prmt.b32 src, %2, 0x0, 0x3120;\n"
+      "mov.b32 {src0, src1}, src;\n"
+      "cvt.rn.f16x2.e4m3x2 %0, src0;\n"
+      "cvt.rn.f16x2.e4m3x2 %1, src1;\n"
+      "}"
+      : "=r"(fp16[0]), "=r"(fp16[1])
+      : "r"(i8data));
+#else
+  __nv_fp8_e4m3 const(&src)[2][2] = reinterpret_cast<__nv_fp8_e4m3 const(&)[2][2]>(i8data);
+  half(&dst)[2][2] = reinterpret_cast<half(&)[2][2]>(fp16);
+#pragma unroll
+  for (uint32_t i = 0; i < 2; i++) {
+#pragma unroll
+    for (uint32_t j = 0; j < 2; j++) {
+      dst[i][j] = half(src[j][i]);
+    }
+  }
+#endif
+  return Vec<uint32_t, 2>{convertF16x2WordToBF16x2(fp16[0]), convertF16x2WordToBF16x2(fp16[1])};
 }
 
 template <typename InputElem>
