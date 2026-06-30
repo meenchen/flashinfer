@@ -240,11 +240,13 @@ struct KVCacheList;
 
 template <>
 struct KVCacheList<true> {
-  GMemCacheHead* kCacheVLLM;
-  GMemCacheHead* vCacheVLLM;
-#if ENABLE_4BIT_KV_CACHE
-  GMemCacheHeadSf* kSfCacheVLLM;
-  GMemCacheHeadSf* vSfCacheVLLM;
+  GMemKCacheHead* kCacheVLLM;
+  GMemVCacheHead* vCacheVLLM;
+#if ENABLE_4BIT_K_CACHE
+  GMemKCacheHeadSf* kSfCacheVLLM;
+#endif
+#if ENABLE_4BIT_V_CACHE
+  GMemVCacheHeadSf* vSfCacheVLLM;
 #endif
   KVCachePageIndex const*
       kvCachePageList;  // shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].

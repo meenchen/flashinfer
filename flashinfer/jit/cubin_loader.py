@@ -28,7 +28,7 @@ import uuid
 import filelock
 
 from .core import logger
-from .env import FLASHINFER_CUBIN_DIR
+from .env import FLASHINFER_CSRC_DIR, FLASHINFER_CUBIN_DIR
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
@@ -207,8 +207,8 @@ def load_cubin(cubin_path: str, sha256: str) -> bytes:
 def get_artifact(file_name: str, sha256: str, session=None) -> bytes:
     """Load an artifact (cubin, header, checksum, etc.) from the local cache.
 
-    Checks ``FLASHINFER_CUBIN_DIR / file_name`` first.  If the file is missing
-    or its SHA-256 doesn't match, it is downloaded from
+    Checks ``FLASHINFER_CUBIN_DIR / file_name`` first, then the packaged csrc
+    tree. If neither file has the expected SHA-256, it is downloaded from
     ``FLASHINFER_CUBINS_REPOSITORY``.
 
     Returns the file contents as bytes, or empty bytes on failure.
@@ -218,12 +218,18 @@ def get_artifact(file_name: str, sha256: str, session=None) -> bytes:
     if data:
         return data
 
+    packaged_path = str(FLASHINFER_CSRC_DIR / file_name)
+    data = load_cubin(packaged_path, sha256)
+    if data:
+        return data
+
     if os.getenv("FLASHINFER_NO_DOWNLOAD"):
         raise RuntimeError(
             f"Artifact not found locally: {file_name} "
-            f"(looked at {local_path}). "
+            f"(looked at {local_path} and {packaged_path}). "
             f"FLASHINFER_NO_DOWNLOAD is set — refusing to download. "
-            f"This means flashinfer-cubin is missing this file."
+            f"This means neither flashinfer-cubin nor packaged csrc contains "
+            f"this file."
         )
 
     os.makedirs(os.path.dirname(local_path), exist_ok=True)

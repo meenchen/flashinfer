@@ -24,12 +24,18 @@
 #if SPEC_DEC
 #include "specDec.h"
 #endif
-using CacheElemConverter = ElemTypeConverter<CACHE_ELEM_ENUM>;
-using CacheElem = CacheElemConverter::Type;
+using KCacheElemConverter = ElemTypeConverter<K_CACHE_ELEM_ENUM>;
+using VCacheElemConverter = ElemTypeConverter<V_CACHE_ELEM_ENUM>;
+using KCacheElem = KCacheElemConverter::Type;
+using VCacheElem = VCacheElemConverter::Type;
+// V owns the legacy cache aliases used by the P x V path.
+using CacheElemConverter = VCacheElemConverter;
+using CacheElem = VCacheElem;
 constexpr uint32_t validElemsPerHead = HEAD_ELEMS;
 constexpr bool isMLA = IS_MLA;
 static_assert((isMLA || validElemsPerHead <= 256) &&
-              (sizeof(CacheElem) * validElemsPerHead) % 16 == 0);
+              (sizeof(KCacheElem) * validElemsPerHead) % 16 == 0 &&
+              (sizeof(VCacheElem) * validElemsPerHead) % 16 == 0);
 constexpr uint32_t headElems =
     validElemsPerHead <= 64 ? 64 : (validElemsPerHead <= 128 ? 128 : (isMLA ? 576 : 256));
 static_assert(headElems == 64 || headElems == 128 || headElems == 256 || headElems == 576,
@@ -57,11 +63,18 @@ constexpr uint32_t tokensPerPage = TOKENS_PER_PAGE;
 
 using IOHead = Vec<InputElem, validElemsPerHead>;
 using InputHead = IOHead;
-using GMemCacheHead = Vec<CacheElemConverter::ContainerType,
-                          exactDiv(validElemsPerHead, CacheElemConverter::ElemsPerContainer)>;
-#if ENABLE_4BIT_KV_CACHE
-using GMemCacheHeadSf = Vec<CacheElemConverter::ScalingFactorType,
-                            exactDiv(validElemsPerHead, CacheElemConverter::QuantVectorSize)>;
+using GMemKCacheHead = Vec<KCacheElemConverter::ContainerType,
+                           exactDiv(validElemsPerHead, KCacheElemConverter::ElemsPerContainer)>;
+using GMemVCacheHead = Vec<VCacheElemConverter::ContainerType,
+                           exactDiv(validElemsPerHead, VCacheElemConverter::ElemsPerContainer)>;
+using GMemCacheHead = GMemVCacheHead;
+#if ENABLE_4BIT_K_CACHE
+using GMemKCacheHeadSf = Vec<KCacheElemConverter::ScalingFactorType,
+                             exactDiv(validElemsPerHead, KCacheElemConverter::QuantVectorSize)>;
+#endif
+#if ENABLE_4BIT_V_CACHE
+using GMemVCacheHeadSf = Vec<VCacheElemConverter::ScalingFactorType,
+                             exactDiv(validElemsPerHead, VCacheElemConverter::QuantVectorSize)>;
 #endif
 
 constexpr uint32_t validElemsPerKHead = validElemsPerHead;
@@ -79,11 +92,17 @@ using OutputElem = OutputHead::Elem;
 
 using PaddedInputHead = Vec<InputElem, headElems>;
 // For 4 bit KV cache, each 16 elements (64b) are padded with 64b to match 128b banks.
-using PaddedCacheHead = Vec<CacheElemConverter::ContainerType, headElems>;
+using PaddedKCacheHead = Vec<KCacheElemConverter::ContainerType, headElems>;
+using PaddedVCacheHead = Vec<VCacheElemConverter::ContainerType, headElems>;
+using PaddedCacheHead = PaddedVCacheHead;
 
-#if ENABLE_4BIT_KV_CACHE
-using PaddedCacheHeadSf =
-    Vec<CacheElemConverter::ScalingFactorType, headElems / CacheElemConverter::QuantVectorSize>;
+#if ENABLE_4BIT_K_CACHE
+using PaddedKCacheHeadSf =
+    Vec<KCacheElemConverter::ScalingFactorType, headElems / KCacheElemConverter::QuantVectorSize>;
+#endif
+#if ENABLE_4BIT_V_CACHE
+using PaddedVCacheHeadSf =
+    Vec<VCacheElemConverter::ScalingFactorType, headElems / VCacheElemConverter::QuantVectorSize>;
 #endif
 
 // impl detail, may be moved to mha.cu/mha_sm90.cu
@@ -91,7 +110,7 @@ constexpr bool isHeadPadded = (validElemsPerHead != headElems);
 
 constexpr bool useInputKV = USE_INPUT_KV;
 
-using GMemKVCacheHead = mha::conditional_t<useInputKV, GMemCacheHead, GMemCacheHead const>;
+using GMemKVCacheHead = mha::conditional_t<useInputKV, GMemVCacheHead, GMemVCacheHead const>;
 
 using KVCachePageIndex =
     int32_t;  // shape: KVCacheHead[nbKHeads][tokensPerPage]. Page index in the global pool of pages
@@ -105,69 +124,74 @@ struct BeamSearchParams {
                                             // but we have to match trt-llm API.
 };
 
-void launchMHA(
-    cudaDeviceProp const& prop, uint32_t const nbKHeads,
+void launchMHA(cudaDeviceProp const& prop, uint32_t const nbKHeads,
 #if SLIDING_WINDOW
-    uint32_t slidingWinSize,
+               uint32_t slidingWinSize,
 #endif
-    float qScale, float const* qScalePtr, OutputHead* output,
+               float qScale, float const* qScalePtr, OutputHead* output,
 #if LOW_PREC_OUTPUT
-    float rcpOutScale,
+               float rcpOutScale,
 #endif
 #if USE_INPUT_KV
-    InputHead const* qkv,
+               InputHead const* qkv,
 #if ROPE_STYLE != 0
-    Vec<float, validElemsPerHead> const* ropeCosSin,
+               Vec<float, validElemsPerHead> const* ropeCosSin,
 #endif
 #else
-    InputHead const* q,
+               InputHead const* q,
 #endif
-    float const* attentionSinks,  // [headGrpSize]
-    GMemCacheHead* kCacheVLLM, GMemCacheHead* vCacheVLLM,
-#if ENABLE_4BIT_KV_CACHE
-    GMemCacheHeadSf* kSfCacheVLLM, GMemCacheHeadSf* vSfCacheVLLM,
+               float const* attentionSinks,  // [headGrpSize]
+               GMemKCacheHead* kCacheVLLM, GMemVCacheHead* vCacheVLLM,
+#if ENABLE_4BIT_K_CACHE
+               GMemKCacheHeadSf* kSfCacheVLLM,
+#endif
+#if ENABLE_4BIT_V_CACHE
+               GMemVCacheHeadSf* vSfCacheVLLM,
 #endif
 
-    KVCachePageIndex const*
-        kvCachePageList,  // device pointer. shape:
-                          // KVCachePage[batchSize][beamWidth][2][maxNbPagesPerSeq]
-    uint32_t maxSeqLen, uint32_t const* seqLen,
+               KVCachePageIndex const*
+                   kvCachePageList,  // device pointer. shape:
+                                     // KVCachePage[batchSize][beamWidth][2][maxNbPagesPerSeq]
+               uint32_t maxSeqLen, uint32_t const* seqLen,
 #if BEAM_WIDTH > 1
-    BeamSearchParams const& beamSearchParams,
+               BeamSearchParams const& beamSearchParams,
 #endif
-    uint32_t batchSize, float kvCacheScale,
-    float const* kvScalePtr,  // Same scale for K and V cache. Used only for int8/fp8 KV cache.
+               uint32_t batchSize, float kCacheScale, float const* kScalePtr, float vCacheScale,
+               float const* vScalePtr,
 #if SPEC_DEC
-    SpecDecParams const& specDecParams,
+               SpecDecParams const& specDecParams,
 #endif
-    uint32_t* semaphores, void* scratch, bool enable_pdl, uint64_t kv_stride_page,
-    uint64_t kv_stride_token, uint64_t kv_stride_head,
-#if ENABLE_4BIT_KV_CACHE
-    uint64_t sf_stride_page, uint64_t sf_stride_token, uint64_t sf_stride_head,
-#endif
-    cudaStream_t stream);
+               uint32_t* semaphores, void* scratch, bool enable_pdl, uint64_t k_stride_page,
+               uint64_t k_stride_token, uint64_t k_stride_head, uint64_t v_stride_page,
+               uint64_t v_stride_token, uint64_t v_stride_head, uint64_t k_sf_stride_page,
+               uint64_t k_sf_stride_token, uint64_t k_sf_stride_head, uint64_t v_sf_stride_page,
+               uint64_t v_sf_stride_token, uint64_t v_sf_stride_head, cudaStream_t stream);
 
 void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32_t slidingWinSize,
                          float qScale, float const* qScalePtr, OutputHead* output,
 #if LOW_PREC_OUTPUT
                          float rcpOutScale,
 #endif
-                         InputHead const* q, float const* attentionSinks, GMemCacheHead* kCacheVLLM,
-                         GMemCacheHead* vCacheVLLM,
-#if ENABLE_4BIT_KV_CACHE
-                         GMemCacheHeadSf* kSfCacheVLLM, GMemCacheHeadSf* vSfCacheVLLM,
+                         InputHead const* q, float const* attentionSinks,
+                         GMemKCacheHead* kCacheVLLM, GMemVCacheHead* vCacheVLLM,
+#if ENABLE_4BIT_K_CACHE
+                         GMemKCacheHeadSf* kSfCacheVLLM,
+#endif
+#if ENABLE_4BIT_V_CACHE
+                         GMemVCacheHeadSf* vSfCacheVLLM,
 #endif
                          KVCachePageIndex const* kvCachePageList, uint32_t maxSeqLen,
-                         uint32_t const* seqLen, uint32_t batchSize, float kvCacheScale,
-                         float const* kvScalePtr,
+                         uint32_t const* seqLen, uint32_t batchSize, float kCacheScale,
+                         float const* kScalePtr, float vCacheScale, float const* vScalePtr,
 #if SPEC_DEC
                          uint32_t qSeqLen, uint32_t const* qCuSeqLens, MaskType const* mask,
 #endif
                          uint32_t* semaphores, void* scratch, bool enable_pdl,
-                         uint64_t kv_stride_page, uint64_t kv_stride_token, uint64_t kv_stride_head,
-#if ENABLE_4BIT_KV_CACHE
-                         uint64_t sf_stride_page, uint64_t sf_stride_token, uint64_t sf_stride_head,
-#endif
+                         uint64_t k_stride_page, uint64_t k_stride_token, uint64_t k_stride_head,
+                         uint64_t v_stride_page, uint64_t v_stride_token, uint64_t v_stride_head,
+                         uint64_t k_sf_stride_page, uint64_t k_sf_stride_token,
+                         uint64_t k_sf_stride_head, uint64_t v_sf_stride_page,
+                         uint64_t v_sf_stride_token, uint64_t v_sf_stride_head,
                          cudaStream_t stream);
 
 void launchHopperF8MHA(
@@ -253,14 +277,20 @@ constexpr uint32_t nbQHeads = nbKHeads * headGrpSize;
 constexpr uint32_t nbQKVHeads = nbQHeads + nbKHeads + nbVHeads;
 #endif
 constexpr uint32_t cacheElemSize = sizeof(CacheElem);
+constexpr uint32_t kCacheElemSize = sizeof(KCacheElem);
+constexpr uint32_t vCacheElemSize = sizeof(VCacheElem);
 constexpr uint32_t inputElemSize = sizeof(InputElem);
 constexpr uint32_t outputElemSize = sizeof(OutputElem);
 
 constexpr uint32_t ioHeadBytes = sizeof(IOHead);
 constexpr uint32_t gmemCacheHeadBytes = sizeof(GMemCacheHead);
+constexpr uint32_t gmemKCacheHeadBytes = sizeof(GMemKCacheHead);
+constexpr uint32_t gmemVCacheHeadBytes = sizeof(GMemVCacheHead);
 
 constexpr uint32_t paddedInputHeadBytes = sizeof(PaddedInputHead);
 constexpr uint32_t paddedCacheHeadBytes = sizeof(PaddedCacheHead);
+constexpr uint32_t paddedKCacheHeadBytes = sizeof(PaddedKCacheHead);
+constexpr uint32_t paddedVCacheHeadBytes = sizeof(PaddedVCacheHead);
 
 constexpr bool allowMultiBlockMode = ALLOW_MULTI_BLOCK_MODE;
 

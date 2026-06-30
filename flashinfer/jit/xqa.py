@@ -15,9 +15,12 @@ limitations under the License.
 """
 
 import functools
+import hashlib
+import os
+
+import torch
 
 from . import env as jit_env
-import torch
 from .utils import filename_safe_dtype_map
 from ..compilation_context import CompilationContext
 from .core import (
@@ -60,6 +63,8 @@ def gen_xqa_module(
     output_dtype: torch.dtype,
     q_seq_len: int = 1,
     use_ragged_q: bool = False,
+    mixed_kv: bool = False,
+    use_packaged_mixed_cubin: bool | None = None,
 ) -> JitSpec:
     if input_dtype == torch.float16:
         flag_input_dtype = ["-DINPUT_FP16=1", "-DDTYPE=__half"]
@@ -70,7 +75,15 @@ def gen_xqa_module(
             f"Invalid dtype: {input_dtype} for XQA, only float16 and bfloat16 input are supported"
         )
 
-    if kv_cache_dtype == torch.float8_e4m3fn:
+    if mixed_kv:
+        if kv_cache_dtype != torch.uint8:
+            raise ValueError("mixed XQA expects an NVFP4 V cache")
+        flag_kv_cache_dtype = [
+            "-DCACHE_ELEM_ENUM=3",
+            "-DK_CACHE_ELEM_ENUM=2",
+            "-DV_CACHE_ELEM_ENUM=3",
+        ]
+    elif kv_cache_dtype == torch.float8_e4m3fn:
         flag_kv_cache_dtype = ["-DCACHE_ELEM_ENUM=2"]
     elif kv_cache_dtype == torch.int8:
         flag_kv_cache_dtype = ["-DCACHE_ELEM_ENUM=1"]
@@ -129,15 +142,31 @@ def gen_xqa_module(
         supported_major_versions=[9, 10, 12], map_sm107_to_100f=True
     )
     sm_nvcc_flags = nvcc_flags
+    target_archs = compilation_context.TARGET_CUDA_ARCHS
 
     flag_mla_wrapper = ["-DMLA_WRAPPER=0"]
 
+    packaged_cubin_eligible = (
+        mixed_kv
+        and input_dtype == torch.bfloat16
+        and output_dtype == torch.bfloat16
+        and page_size == 16
+        and head_dim == 128
+        and head_group_ratio == 4
+        and not use_sliding_window
+        and q_seq_len == 1
+        and (10, "0a") in target_archs
+        and os.getenv("FLASHINFER_XQA_DISABLE_PACKAGED_MIXED_CUBIN") != "1"
+    )
+    if use_packaged_mixed_cubin is None:
+        use_packaged_mixed_cubin = target_archs == {(10, "0a")}
+    use_mixed_cubin = packaged_cubin_eligible and use_packaged_mixed_cubin
     sources = [
-        jit_env.FLASHINFER_CSRC_DIR / "xqa/mha.cu",
+        jit_env.FLASHINFER_CSRC_DIR
+        / ("xqa/mixed_cubin_launcher.cu" if use_mixed_cubin else "xqa/mha.cu"),
         jit_env.FLASHINFER_CSRC_DIR / "xqa/xqa_wrapper.cu",
         jit_env.FLASHINFER_CSRC_DIR / "flashinfer_xqa_binding.cu",
     ]
-
     if _has_sm90_target():
         sources.append(jit_env.FLASHINFER_CSRC_DIR / "xqa/mha_sm90.cu")
         sources.append(jit_env.FLASHINFER_CSRC_DIR / "xqa/tensorMap.cpp")
@@ -145,11 +174,30 @@ def gen_xqa_module(
     else:
         flag_sm90_mha = ["-DUSE_SM90_MHA=0"]
 
+    flag_mixed_cubin = []
+    if use_mixed_cubin:
+        mixed_cubin = (
+            jit_env.FLASHINFER_CSRC_DIR
+            / "xqa/cubin/fp8_k_nvfp4_v_h128_g4_p16.cubin"
+        )
+        cubin_hash = hashlib.sha256(mixed_cubin.read_bytes()).hexdigest()
+        flag_mixed_cubin = [f"-DMIXED_XQA_CUBIN_SHA={cubin_hash}"]
+
     # Suffix the URI only when ragged Q actually changes the compile flags
     # (i.e. it suppressed the SPEC_Q_SEQ_LEN specialization above).
     ragged_suffix = "_ragged_q" if ragged_changes_flags else ""
+    implementation_suffix = "_packaged_cubin" if use_mixed_cubin else ""
+    kv_name = (
+        "fp8_k_nvfp4_v"
+        if mixed_kv
+        else filename_safe_dtype_map[kv_cache_dtype]
+    )
     return gen_jit_spec(
-        f"xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}{ragged_suffix}",
+        f"xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{kv_name}_"
+        f"output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_"
+        f"head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_"
+        f"use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_"
+        f"spec_q_seq_len_{q_seq_len}{ragged_suffix}{implementation_suffix}",
         sources,
         extra_cuda_cflags=xqa_nvcc_flags
         + sm_nvcc_flags
@@ -162,7 +210,8 @@ def gen_xqa_module(
         + flag_low_prec_output
         + flag_spec_dec
         + flag_mla_wrapper
-        + flag_sm90_mha,
+        + flag_sm90_mha
+        + flag_mixed_cubin,
         extra_ldflags=["-lcuda"],  # Add CUDA Driver API library
     )
 

@@ -34,10 +34,12 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
                  tvm::ffi::Optional<TensorView> attentionSinks, TensorView kCacheVLLM,
                  TensorView vCacheVLLM, tvm::ffi::Optional<TensorView> kSfCacheVLLM,
                  tvm::ffi::Optional<TensorView> vSfCacheVLLM, TensorView kvCachePageList,
-                 int64_t maxSeqLen, TensorView seqLen, int64_t batchSize, double kvCacheScale,
-                 tvm::ffi::Optional<TensorView> kvScaleTensor, int64_t qSeqLen,
-                 tvm::ffi::Optional<TensorView> qCuSeqLens, tvm::ffi::Optional<TensorView> mask,
-                 TensorView semaphores, TensorView scratch, bool enable_pdl);
+                 int64_t maxSeqLen, TensorView seqLen, int64_t batchSize, double kCacheScale,
+                 tvm::ffi::Optional<TensorView> kScaleTensor, double vCacheScale,
+                 tvm::ffi::Optional<TensorView> vScaleTensor, int64_t qSeqLen,
+                 tvm::ffi::Optional<TensorView> qCuSeqLens,
+                 tvm::ffi::Optional<TensorView> mask, TensorView semaphores,
+                 TensorView scratch, bool enable_pdl);
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(xqa_wrapper, xqa_wrapper);
 

@@ -56,8 +56,9 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
                  Optional<TensorView> attentionSinks, TensorView kCacheVLLM, TensorView vCacheVLLM,
                  Optional<TensorView> kSfCacheVLLM, Optional<TensorView> vSfCacheVLLM,
                  TensorView kvCachePageList, int64_t maxSeqLen, TensorView seqLen,
-                 int64_t batchSize, double kvCacheScale, Optional<TensorView> kvScaleTensor,
-                 int64_t qSeqLen, Optional<TensorView> qCuSeqLens, Optional<TensorView> mask,
+                 int64_t batchSize, double kCacheScale, Optional<TensorView> kScaleTensor,
+                 double vCacheScale, Optional<TensorView> vScaleTensor, int64_t qSeqLen,
+                 Optional<TensorView> qCuSeqLens, Optional<TensorView> mask,
                  TensorView semaphores, TensorView scratch, bool enable_pdl) {
   auto stream = get_stream(output.device());
   float const* attentionSinksPtr =
@@ -66,23 +67,29 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
   float const* qScalePtr = qScaleTensor.has_value()
                                ? reinterpret_cast<float const*>(qScaleTensor.value().data_ptr())
                                : nullptr;
-  float const* kvScalePtr = kvScaleTensor.has_value()
-                                ? reinterpret_cast<float const*>(kvScaleTensor.value().data_ptr())
-                                : nullptr;
+  float const* kScalePtr = kScaleTensor.has_value()
+                               ? reinterpret_cast<float const*>(kScaleTensor.value().data_ptr())
+                               : nullptr;
+  float const* vScalePtr = vScaleTensor.has_value()
+                               ? reinterpret_cast<float const*>(vScaleTensor.value().data_ptr())
+                               : nullptr;
+
   // Extract strides from TensorView (in elements, not bytes)
-  uint64_t kv_stride_page = kCacheVLLM.stride(0);
-  uint64_t kv_stride_token = kCacheVLLM.stride(-3);
-  uint64_t kv_stride_head = kCacheVLLM.stride(-2);
-#if ENABLE_4BIT_KV_CACHE
-  uint64_t sf_stride_page = kv_stride_page;
-  uint64_t sf_stride_token = kv_stride_token;
-  uint64_t sf_stride_head = kv_stride_head;
-  if (kSfCacheVLLM.has_value()) {
-    sf_stride_page = kSfCacheVLLM.value().stride(0);
-    sf_stride_token = kSfCacheVLLM.value().stride(-3);
-    sf_stride_head = kSfCacheVLLM.value().stride(-2);
-  }
-#endif
+  uint64_t k_stride_page = kCacheVLLM.stride(0);
+  uint64_t k_stride_token = kCacheVLLM.stride(-3);
+  uint64_t k_stride_head = kCacheVLLM.stride(-2);
+  uint64_t v_stride_page = vCacheVLLM.stride(0);
+  uint64_t v_stride_token = vCacheVLLM.stride(-3);
+  uint64_t v_stride_head = vCacheVLLM.stride(-2);
+  auto sf_stride = [](Optional<TensorView> const& sf, int dim) -> uint64_t {
+    return sf.has_value() ? sf.value().stride(dim) : 0;
+  };
+  uint64_t k_sf_stride_page = sf_stride(kSfCacheVLLM, 0);
+  uint64_t k_sf_stride_token = sf_stride(kSfCacheVLLM, -3);
+  uint64_t k_sf_stride_head = sf_stride(kSfCacheVLLM, -2);
+  uint64_t v_sf_stride_page = sf_stride(vSfCacheVLLM, 0);
+  uint64_t v_sf_stride_token = sf_stride(vSfCacheVLLM, -3);
+  uint64_t v_sf_stride_head = sf_stride(vSfCacheVLLM, -2);
 
 #if SPEC_DEC
   MaskType const* maskPtr =
@@ -115,13 +122,13 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
         reinterpret_cast<GMemCacheHead*>(kCacheVLLM.data_ptr()),
         reinterpret_cast<GMemCacheHead*>(vCacheVLLM.data_ptr()),
         reinterpret_cast<KVCachePageIndex const*>(kvCachePageList.data_ptr()), maxSeqLen,
-        reinterpret_cast<uint32_t const*>(seqLen.data_ptr()), batchSize, kvCacheScale, kvScalePtr,
+        reinterpret_cast<uint32_t const*>(seqLen.data_ptr()), batchSize, kCacheScale, kScalePtr,
 #if SPEC_DEC
         qSeqLen, qCuSeqLensPtr, maskPtr,
 #endif
         reinterpret_cast<uint32_t*>(semaphores.data_ptr()),
-        reinterpret_cast<void*>(scratch.data_ptr()), enable_pdl, kv_stride_page, kv_stride_token,
-        kv_stride_head, stream);
+        reinterpret_cast<void*>(scratch.data_ptr()), enable_pdl, k_stride_page, k_stride_token,
+        k_stride_head, stream);
     return;
   }
 #endif
@@ -132,24 +139,24 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
                       rcpOutScale,
 #endif
                       reinterpret_cast<InputHead const*>(q.data_ptr()), attentionSinksPtr,
-                      reinterpret_cast<GMemCacheHead*>(kCacheVLLM.data_ptr()),
-                      reinterpret_cast<GMemCacheHead*>(vCacheVLLM.data_ptr()),
-#if ENABLE_4BIT_KV_CACHE
-                      reinterpret_cast<GMemCacheHeadSf*>(kSfCachePtr),
-                      reinterpret_cast<GMemCacheHeadSf*>(vSfCachePtr),
+                      reinterpret_cast<GMemKCacheHead*>(kCacheVLLM.data_ptr()),
+                      reinterpret_cast<GMemVCacheHead*>(vCacheVLLM.data_ptr()),
+#if ENABLE_4BIT_K_CACHE
+                      reinterpret_cast<GMemKCacheHeadSf*>(kSfCachePtr),
+#endif
+#if ENABLE_4BIT_V_CACHE
+                      reinterpret_cast<GMemVCacheHeadSf*>(vSfCachePtr),
 #endif
                       reinterpret_cast<KVCachePageIndex const*>(kvCachePageList.data_ptr()),
                       maxSeqLen, reinterpret_cast<uint32_t const*>(seqLen.data_ptr()), batchSize,
-                      kvCacheScale, kvScalePtr,
+                      kCacheScale, kScalePtr, vCacheScale, vScalePtr,
 #if SPEC_DEC
                       qSeqLen, qCuSeqLensPtr, maskPtr,
 #endif
                       reinterpret_cast<uint32_t*>(semaphores.data_ptr()),
-                      reinterpret_cast<void*>(scratch.data_ptr()), enable_pdl, kv_stride_page,
-                      kv_stride_token, kv_stride_head,
-#if ENABLE_4BIT_KV_CACHE
-                      sf_stride_page, sf_stride_token, sf_stride_head,
-#endif
-                      stream);
+                      reinterpret_cast<void*>(scratch.data_ptr()), enable_pdl, k_stride_page,
+                      k_stride_token, k_stride_head, v_stride_page, v_stride_token, v_stride_head,
+                      k_sf_stride_page, k_sf_stride_token, k_sf_stride_head, v_sf_stride_page,
+                      v_sf_stride_token, v_sf_stride_head, stream);
 }
 #endif
