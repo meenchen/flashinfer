@@ -83,12 +83,45 @@ using MaskType = uint32_t;
 static_assert(SPEC_DEC, "SPEC_Q_SEQ_LEN should only be used when SPEC_DEC is enabled.");
 #endif
 
-// 0: half/bf16 based on INPUT_FP16; 1: int8_t; 2: __nv_fp8_e4m3
+// 0: half/bf16 based on INPUT_FP16; 1: int8_t; 2: __nv_fp8_e4m3;
+// 3: packed NVFP4 E2M1 with FP8 block scales.
 #ifndef CACHE_ELEM_ENUM
 #define CACHE_ELEM_ENUM 2
 #endif
 
-#if CACHE_ELEM_ENUM == 3
+#ifndef K_CACHE_ELEM_ENUM
+#define K_CACHE_ELEM_ENUM CACHE_ELEM_ENUM
+#endif
+
+#ifndef V_CACHE_ELEM_ENUM
+#define V_CACHE_ELEM_ENUM CACHE_ELEM_ENUM
+#endif
+
+#ifndef MIXED_KV_CACHE
+#if K_CACHE_ELEM_ENUM != V_CACHE_ELEM_ENUM
+#define MIXED_KV_CACHE 1
+#else
+#define MIXED_KV_CACHE 0
+#endif
+#endif
+
+#if MIXED_KV_CACHE && (K_CACHE_ELEM_ENUM != 2 || V_CACHE_ELEM_ENUM != 3)
+#error "Only FP8-K/NVFP4-V mixed XQA is supported"
+#endif
+
+#if K_CACHE_ELEM_ENUM == 3
+#define ENABLE_4BIT_K_CACHE 1
+#else
+#define ENABLE_4BIT_K_CACHE 0
+#endif
+
+#if V_CACHE_ELEM_ENUM == 3
+#define ENABLE_4BIT_V_CACHE 1
+#else
+#define ENABLE_4BIT_V_CACHE 0
+#endif
+
+#if ENABLE_4BIT_K_CACHE || ENABLE_4BIT_V_CACHE
 #define ENABLE_4BIT_KV_CACHE 1
 #else
 #define ENABLE_4BIT_KV_CACHE 0

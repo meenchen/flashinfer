@@ -724,6 +724,14 @@ __device__ __host__ inline void assertClose(half a, half b, float threshold = 0.
   assertClose(__half2float(a), __half2float(b), threshold);
 }
 
+#if MIXED_KV_CACHE
+__device__ inline uint32_t convertF16x2WordToBF16x2(uint32_t data) {
+  __half2 fp16 = reinterpret_cast<__half2&>(data);
+  __nv_bfloat162 bf16 = __float22bfloat162_rn(__half22float2(fp16));
+  return reinterpret_cast<uint32_t&>(bf16);
+}
+#endif
+
 template <typename InputElem, typename CacheElem>
 __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16(uint32_t i8data) {
   static_assert(mha::is_same_v<InputElem, half> || mha::is_same_v<InputElem, __nv_bfloat16>,
@@ -751,6 +759,31 @@ __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16(uint32_t i8data) {
   }
   return ret;
 }
+
+#if MIXED_KV_CACHE
+template <>
+__device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<__nv_bfloat16, __nv_fp8_e4m3>(
+    uint32_t i8data) {
+  Vec<uint32_t, 2> fp16;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  uint16_t(&src)[2] = reinterpret_cast<uint16_t(&)[2]>(i8data);
+  asm("{\n"
+      "cvt.rn.f16x2.e4m3x2 %0, %2;\n"
+      "cvt.rn.f16x2.e4m3x2 %1, %3;\n"
+      "}"
+      : "=r"(fp16[0]), "=r"(fp16[1])
+      : "h"(src[0]), "h"(src[1]));
+#else
+  __nv_fp8_e4m3 const(&src)[4] = reinterpret_cast<__nv_fp8_e4m3 const(&)[4]>(i8data);
+  half(&dst)[4] = reinterpret_cast<half(&)[4]>(fp16);
+#pragma unroll
+  for (uint32_t i = 0; i < 4; i++) {
+    dst[i] = half(src[i]);
+  }
+#endif
+  return Vec<uint32_t, 2>{convertF16x2WordToBF16x2(fp16[0]), convertF16x2WordToBF16x2(fp16[1])};
+}
+#endif
 
 #if ENABLE_4BIT_KV_CACHE
 template <>

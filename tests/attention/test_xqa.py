@@ -466,6 +466,137 @@ def test_xqa(
 
 
 @pytest.mark.skipif(
+    get_compute_capability(torch.device(device="cuda"))[0] != 10,
+    reason="FP8-K/NVFP4-V XQA requires an SM100-family GPU",
+)
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_xqa_fp8_k_nvfp4_v_cuda_graph(kv_layout: str, dtype: torch.dtype):
+    set_random_seed(7)
+    batch_size = 2
+    page_size = 16
+    num_kv_heads = 2
+    num_q_heads = 8
+    head_dim = 128
+    pages_per_seq = 2
+    num_pages = batch_size * pages_per_seq
+
+    q = torch.randn(
+        batch_size,
+        1,
+        num_q_heads,
+        head_dim,
+        dtype=dtype,
+        device="cuda",
+    )
+    k_scale = torch.tensor([0.025], dtype=torch.float32, device="cuda")
+    v_scale = torch.tensor([0.125], dtype=torch.float32, device="cuda")
+    k_logical = (
+        (
+            torch.randn(
+                num_pages,
+                page_size,
+                num_kv_heads,
+                head_dim,
+                device="cuda",
+            )
+            / k_scale
+        )
+        .clamp(-448, 448)
+        .to(torch.float8_e4m3fn)
+    )
+    v_logical = torch.empty(
+        num_pages,
+        page_size,
+        num_kv_heads,
+        head_dim // 2,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    # Opposite constant heads make any packed FP4 head-stride aliasing obvious.
+    v_logical[:, :, 0].fill_(0x77)
+    v_logical[:, :, 1].fill_(0xFF)
+    v_sf_logical = torch.ones(
+        num_pages,
+        page_size,
+        num_kv_heads,
+        head_dim // 16,
+        dtype=torch.float8_e4m3fn,
+        device="cuda",
+    )
+    if kv_layout == "HND":
+        k_cache = k_logical.permute(0, 2, 1, 3).contiguous()
+        v_cache = v_logical.permute(0, 2, 1, 3).contiguous()
+        v_sf_cache = v_sf_logical.permute(0, 2, 1, 3).contiguous()
+    else:
+        k_cache = k_logical
+        v_cache = v_logical
+        v_sf_cache = v_sf_logical
+
+    page_table = torch.arange(num_pages, dtype=torch.int32, device="cuda").view(
+        batch_size, pages_per_seq
+    )
+    lengths = [17, 29]
+    seq_lens = torch.tensor(lengths, dtype=torch.uint32, device="cuda")[:, None]
+    output = torch.empty_like(q)
+    workspace = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
+    semaphores = torch.zeros(64, dtype=torch.uint32, device="cuda")
+
+    def run():
+        xqa(
+            q,
+            k_cache,
+            v_cache,
+            page_table,
+            seq_lens,
+            output,
+            workspace,
+            semaphores,
+            num_kv_heads,
+            page_size,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            kv_layout=kv_layout,
+            sm_count=sm_count,
+            enable_pdl=False,
+            v_sf_cache=v_sf_cache,
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    fp4_magnitudes = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda"
+    )
+    nibbles = torch.stack((v_logical & 0xF, v_logical >> 4), dim=-1).flatten(-2)
+    v_float = fp4_magnitudes[(nibbles & 7).long()]
+    v_float = torch.where((nibbles & 8) != 0, -v_float, v_float)
+    v_float *= v_sf_logical.float().repeat_interleave(16, dim=-1) * v_scale
+    k_float = k_logical.float() * k_scale
+
+    reference = torch.empty_like(output)
+    group_size = num_q_heads // num_kv_heads
+    for batch_idx, seq_len in enumerate(lengths):
+        pages = page_table[batch_idx]
+        token_k = k_float[pages].flatten(0, 1)[:seq_len]
+        token_v = v_float[pages].flatten(0, 1)[:seq_len]
+        for q_head_idx in range(num_q_heads):
+            kv_head_idx = q_head_idx // group_size
+            scores = (
+                token_k[:, kv_head_idx].float() @ q[batch_idx, 0, q_head_idx].float()
+            ) / math.sqrt(head_dim)
+            reference[batch_idx, 0, q_head_idx] = (
+                torch.softmax(scores, dim=0)[:, None] * token_v[:, kv_head_idx].float()
+            ).sum(dim=0)
+
+    torch.testing.assert_close(output, reference, rtol=0.01, atol=0.01)
+
+
+@pytest.mark.skipif(
     get_compute_capability(torch.device(device="cuda"))[0] not in [12],
     reason="XQA mla is only supported on SM120/SM121 GPUs",
 )

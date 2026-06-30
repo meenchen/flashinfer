@@ -42,6 +42,7 @@ def get_xqa_module(
     use_sliding_window: bool,
     output_dtype: torch.dtype,
     q_seq_len: int,
+    fp8_k_nvfp4_v: bool = False,
 ):
     module = gen_xqa_module(
         input_dtype,
@@ -52,6 +53,7 @@ def get_xqa_module(
         use_sliding_window,
         output_dtype,
         q_seq_len,
+        fp8_k_nvfp4_v,
     ).build_and_load()
 
     if q_seq_len > 1:
@@ -59,9 +61,21 @@ def get_xqa_module(
     else:
         use_spec_dec = False
 
+    kv_name = (
+        "fp8_k_nvfp4_v" if fp8_k_nvfp4_v else filename_safe_dtype_map[kv_cache_dtype]
+    )
+    op_name = (
+        f"flashinfer::xqa_input_{filename_safe_dtype_map[input_dtype]}_"
+        f"kv_cache_{kv_name}_output_{filename_safe_dtype_map[output_dtype]}_"
+        f"page_size_{page_size}_head_dim_{head_dim}_"
+        f"head_group_ratio_{head_group_ratio}_"
+        f"use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_"
+        f"spec_q_seq_len_{q_seq_len}"
+    )
+
     @register_custom_op(
-        f"flashinfer::xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}",
-        mutates_args=("output", "workspace_buffer"),
+        op_name,
+        mutates_args=("output", "semaphores", "workspace_buffer"),
     )
     def xqa(
         run_sm90_fp8_mha: bool,
@@ -81,13 +95,27 @@ def get_xqa_module(
         max_seq_len: int,
         seq_lens: torch.Tensor,
         batch_size: int,
-        kv_scale: Union[float, torch.Tensor],
+        k_scale: Union[float, torch.Tensor],
+        v_scale: Union[float, torch.Tensor],
         semaphores: torch.Tensor,
         workspace_buffer: torch.Tensor,
         enable_pdl: bool,
         q_seq_len: int,
         mask: Optional[torch.Tensor],
     ) -> None:
+        k_scale_args = (
+            1.0 if isinstance(k_scale, torch.Tensor) else k_scale,
+            None if isinstance(k_scale, float) else k_scale,
+        )
+        scale_args = (
+            (
+                *k_scale_args,
+                1.0 if isinstance(v_scale, torch.Tensor) else v_scale,
+                None if isinstance(v_scale, float) else v_scale,
+            )
+            if fp8_k_nvfp4_v
+            else k_scale_args
+        )
         module.xqa_wrapper(
             run_sm90_fp8_mha,
             sm_count,
@@ -107,8 +135,7 @@ def get_xqa_module(
             max_seq_len,
             seq_lens,
             batch_size,
-            1.0 if isinstance(kv_scale, torch.Tensor) else kv_scale,
-            None if isinstance(kv_scale, float) else kv_scale,
+            *scale_args,
             q_seq_len,
             mask,
             semaphores,
@@ -116,9 +143,7 @@ def get_xqa_module(
             enable_pdl,
         )
 
-    @register_fake_op(
-        f"flashinfer::xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}"
-    )
+    @register_fake_op(op_name)
     def _fake_xqa(
         run_sm90_fp8_mha: bool,
         sm_count: int,
@@ -137,7 +162,8 @@ def get_xqa_module(
         max_seq_len: int,
         seq_lens: torch.Tensor,
         batch_size: int,
-        kv_scale: Union[float, torch.Tensor],
+        k_scale: Union[float, torch.Tensor],
+        v_scale: Union[float, torch.Tensor],
         semaphores: torch.Tensor,
         workspace_buffer: torch.Tensor,
         enable_pdl: bool,
@@ -174,6 +200,8 @@ def xqa(
     q_seq_len: int = 1,
     mask: Optional[torch.Tensor] = None,
     *,
+    k_scale: Optional[Union[float, torch.Tensor]] = None,
+    v_scale: Optional[Union[float, torch.Tensor]] = None,
     k_sf_cache: Optional[torch.Tensor] = None,
     v_sf_cache: Optional[torch.Tensor] = None,
 ) -> None:
@@ -189,18 +217,18 @@ def xqa(
         Paged K cache tensor with shape ``[num_pages, page_size, num_kv_heads, head_dim]`` if :attr:`kv_layout` is ``NHD``,
         or ``[num_pages, num_kv_heads, page_size, head_dim]`` if :attr:`kv_layout` is ``HND``.
         Data type should match query tensor or be torch.float8_e4m3fn, in which case xqa will run fp8 calculation.
-        Should be the same data type as v_cache. When using NVFP4 KV, the data type is torch.uint8, and the last dimension should be `head_dim / 2`.
+        May be torch.float8_e4m3fn while V uses NVFP4.
     v_cache: torch.Tensor
         Paged V cache tensor with shape ``[num_pages, page_size, num_kv_heads, head_dim]`` if :attr:`kv_layout` is ``NHD``,
         or ``[num_pages, num_kv_heads, page_size, head_dim]`` if :attr:`kv_layout` is ``HND``.
         Data type should match query tensor or be torch.float8_e4m3fn, in which case xqa will run fp8 calculation.
-        Should be the same data type as k_cache. When using NVFP4 KV, the data type is torch.uint8, and the last dimension should be `head_dim / 2`.
+        May be NVFP4 while K uses torch.float8_e4m3fn. NVFP4 data uses torch.uint8 with last dimension `head_dim / 2`.
     k_sf_cache: Optional[torch.Tensor]
         Optional scale factor cache tensor for the K cache. Use when NVFP4 KV is used. Expected shape is ``[num_pages, page_size, num_kv_heads, head_dim / 16]`` if :attr:`kv_layout` is ``NHD``,
-        or ``[num_pages, num_kv_heads, page_size, head_dim / 16]`` if :attr:`kv_layout` is ``HND``. Should be the same data type as v_sf_cache. Data type should be torch.uint8.
+        or ``[num_pages, num_kv_heads, page_size, head_dim / 16]`` if :attr:`kv_layout` is ``HND``. Data type should be torch.uint8 or torch.float8_e4m3fn.
     v_sf_cache: Optional[torch.Tensor]
         Optional scale factor cache tensor for the V cache. Use when NVFP4 KV is used. Expected shape is ``[num_pages, page_size, num_kv_heads, head_dim / 16]`` if :attr:`kv_layout` is ``NHD``,
-        or ``[num_pages, num_kv_heads, page_size, head_dim / 16]`` if :attr:`kv_layout` is ``HND``. Should be the same data type as k_sf_cache. Data type should be torch.uint8.
+        or ``[num_pages, num_kv_heads, page_size, head_dim / 16]`` if :attr:`kv_layout` is ``HND``. Data type should be torch.uint8 or torch.float8_e4m3fn.
     page_table : torch.Tensor
         Page table tensor with shape ``batch_size, nb_pages_per_seq``.
         Data type should be torch.int32.
@@ -248,6 +276,10 @@ def xqa(
         Shape: ``[batch_size, q_seq_len, mask_size_per_row]`` where
         ``mask_size_per_row = ((q_seq_len + 31) // 32) * 2``.
         Data type should be torch.uint16 (bit-packed format, aligned to 32 bits).
+    k_scale : Optional[Union[float, torch.Tensor]], default=None
+        K cache scale for FP8-K/NVFP4-V. Defaults to ``kv_scale``.
+    v_scale : Optional[Union[float, torch.Tensor]], default=None
+        V cache scale for FP8-K/NVFP4-V. Defaults to ``kv_scale``.
 
     Note
     ----
@@ -281,7 +313,11 @@ def xqa(
     # Determine if sliding window is used
     use_sliding_window = sliding_win_size > 0
 
-    assert k_cache.dtype == v_cache.dtype, "K and V cache must have the same dtype"
+    fp8_k_nvfp4_v = (
+        k_cache.dtype == torch.float8_e4m3fn and v_cache.dtype == torch.uint8
+    )
+    if not fp8_k_nvfp4_v:
+        assert k_cache.dtype == v_cache.dtype, "K and V cache must have the same dtype"
 
     if output.dtype == torch.float8_e4m3fn:
         assert k_cache.dtype == torch.float8_e4m3fn, (
@@ -307,7 +343,22 @@ def xqa(
     else:
         run_sm90_fp8_mha = False
 
-    if k_cache.dtype == torch.uint8:
+    if fp8_k_nvfp4_v:
+        assert get_compute_capability(q.device)[0] == 10, (
+            "FP8-K/NVFP4-V XQA is only supported on SM100 GPUs"
+        )
+        assert q_seq_len == 1, "FP8-K/NVFP4-V XQA only supports decode"
+        assert head_dim == 128, "FP8-K/NVFP4-V XQA requires head_dim=128"
+        assert k_cache.shape[-1] == head_dim, "FP8 K head dimension is invalid"
+        assert v_cache.shape[-1] == head_dim // 2, (
+            "NVFP4 V must pack two elements per byte"
+        )
+        assert k_sf_cache is None, "FP8 K does not use block scales"
+        assert v_sf_cache is not None, "NVFP4 V requires its scale cache"
+        assert v_sf_cache.shape[-1] == head_dim // 16, (
+            "NVFP4 V requires one scale per 16 elements"
+        )
+    elif k_cache.dtype == torch.uint8:
         assert get_compute_capability(torch.device(device="cuda"))[0] in [12], (
             "XQA NVFP4 KV is only supported on SM120 GPUs"
         )
@@ -319,13 +370,14 @@ def xqa(
 
     xqa_module = get_xqa_module(
         q.dtype,
-        k_cache.dtype,
+        v_cache.dtype if fp8_k_nvfp4_v else k_cache.dtype,
         page_size,
         head_dim,
         head_group_ratio,
         use_sliding_window,
         output.dtype,
         q_seq_len,
+        fp8_k_nvfp4_v,
     )
 
     if q_seq_len > 1:
@@ -333,6 +385,14 @@ def xqa(
         if sinks is not None:
             run_sm90_fp8_mha = False  # TODO: mha_sm90.cu has precision issue if sinks and speculative decoding are used simultaneously
 
+    if fp8_k_nvfp4_v:
+        k_scale = kv_scale if k_scale is None else k_scale
+        v_scale = kv_scale if v_scale is None else v_scale
+    else:
+        assert k_scale is None and v_scale is None, (
+            "Separate K/V scales are only supported for FP8-K/NVFP4-V XQA"
+        )
+        k_scale = v_scale = kv_scale
     xqa_module.xqa(
         run_sm90_fp8_mha,
         sm_count,
@@ -351,7 +411,8 @@ def xqa(
         max_seq_len,
         seq_lens,
         batch_size,
-        kv_scale,
+        k_scale,
+        v_scale,
         semaphores,
         workspace_buffer,
         enable_pdl,

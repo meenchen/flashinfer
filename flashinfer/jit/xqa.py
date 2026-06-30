@@ -14,8 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from . import env as jit_env
 import torch
+
+from . import env as jit_env
 from .utils import filename_safe_dtype_map
 from ..compilation_context import CompilationContext
 from .core import (
@@ -40,6 +41,7 @@ def gen_xqa_module(
     use_sliding_window: bool,
     output_dtype: torch.dtype,
     q_seq_len: int = 1,
+    fp8_k_nvfp4_v: bool = False,
 ) -> JitSpec:
     if input_dtype == torch.float16:
         flag_input_dtype = ["-DINPUT_FP16=1", "-DDTYPE=__half"]
@@ -50,7 +52,22 @@ def gen_xqa_module(
             f"Invalid dtype: {input_dtype} for XQA, only float16 and bfloat16 input are supported"
         )
 
-    if kv_cache_dtype == torch.float8_e4m3fn:
+    if fp8_k_nvfp4_v:
+        if kv_cache_dtype != torch.uint8:
+            raise ValueError("FP8-K/NVFP4-V XQA expects an NVFP4 V cache")
+        if head_dim != 128:
+            raise ValueError("FP8-K/NVFP4-V XQA currently requires head_dim=128")
+        if q_seq_len != 1:
+            raise ValueError("FP8-K/NVFP4-V XQA only supports decode")
+        if output_dtype != input_dtype:
+            raise ValueError("FP8-K/NVFP4-V XQA output must match the query dtype")
+        flag_kv_cache_dtype = [
+            "-DCACHE_ELEM_ENUM=3",
+            "-DK_CACHE_ELEM_ENUM=2",
+            "-DV_CACHE_ELEM_ENUM=3",
+            "-DMIXED_KV_CACHE=1",
+        ]
+    elif kv_cache_dtype == torch.float8_e4m3fn:
         flag_kv_cache_dtype = ["-DCACHE_ELEM_ENUM=2"]
     elif kv_cache_dtype == torch.int8:
         flag_kv_cache_dtype = ["-DCACHE_ELEM_ENUM=1"]
@@ -98,6 +115,7 @@ def gen_xqa_module(
         supported_major_versions=[9, 10, 11, 12]
     )
     sm_nvcc_flags = nvcc_flags
+    target_archs = compilation_context.TARGET_CUDA_ARCHS
 
     flag_mla_wrapper = ["-DMLA_WRAPPER=0"]
 
@@ -107,9 +125,7 @@ def gen_xqa_module(
         jit_env.FLASHINFER_CSRC_DIR / "flashinfer_xqa_binding.cu",
     ]
 
-    target_archs = compilation_context.TARGET_CUDA_ARCHS
-
-    has_sm90 = any(major == 9 for major, minor in target_archs)
+    has_sm90 = not fp8_k_nvfp4_v and any(major == 9 for major, minor in target_archs)
     if has_sm90:
         sources.append(jit_env.FLASHINFER_CSRC_DIR / "xqa/mha_sm90.cu")
         sources.append(jit_env.FLASHINFER_CSRC_DIR / "xqa/tensorMap.cpp")
@@ -118,7 +134,7 @@ def gen_xqa_module(
         flag_sm90_mha = ["-DUSE_SM90_MHA=0"]
 
     return gen_jit_spec(
-        f"xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}",
+        f"xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{'fp8_k_nvfp4_v' if fp8_k_nvfp4_v else filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}",
         sources,
         extra_cuda_cflags=xqa_nvcc_flags
         + sm_nvcc_flags
