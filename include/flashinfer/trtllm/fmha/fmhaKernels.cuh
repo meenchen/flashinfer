@@ -662,11 +662,17 @@ class TllmGenFmhaKernel {
       int totalNumCtas = numCtasX * numCtasZ * numCtasY;
       // Disable the multiCtasKvMode if there is only one CtaKv.
       if (numCtasPerSeqKv <= 1) {
-        selectKernelParams.mMultiCtasKvMode = MultiCtasKvMode::Disabled;
-        // Enable the persistent scheduler for better performance.
-        selectKernelParams.mTileScheduler = TileScheduler::Persistent;
-        // Need to select a different kernel.
-        selectKernelParams.mSelectNewKernel = true;
+        // The mixed transform pipeline does not yet support the persistent
+        // scheduler. Its Gmem kernel is valid with one KV CTA and avoids a
+        // separate cubin until that scheduler dependency is fixed.
+        bool const isFp8KNvFp4V = mDtypeK == DATA_TYPE_E4M3 && mDtypeV == DATA_TYPE_E2M1;
+        if (!isFp8KNvFp4V) {
+          selectKernelParams.mMultiCtasKvMode = MultiCtasKvMode::Disabled;
+          // Enable the persistent scheduler for better performance.
+          selectKernelParams.mTileScheduler = TileScheduler::Persistent;
+          // Need to select a different kernel.
+          selectKernelParams.mSelectNewKernel = true;
+        }
       } else if (totalNumCtas < params.mMultiProcessorCount && isMlaGenKernel(params) &&
                  !isSparseMla(params.mSparseMlaType) && selectKernelParams.mTileSizeKv == 128 &&
                  getEnvUseTileSizeKv64ForTrtllmGen()) {
