@@ -1607,3 +1607,99 @@ def test_trtllm_batch_decode_spec(
         skips_softmax=skips_softmax,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
     )
+
+
+@pytest.mark.parametrize(
+    "pages_per_seq", [2, 8, 128], ids=["single_cta", "cga", "gmem"]
+)
+def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
+    _skip_if_not_blackwell()
+    torch.manual_seed(0)
+
+    batch_size = 2
+    page_size = 64
+    num_kv_heads = 4
+    head_group_size = 4
+    num_qo_heads = num_kv_heads * head_group_size
+    head_dim = 128
+    num_pages = batch_size * pages_per_seq
+
+    query = torch.randn(
+        batch_size,
+        num_qo_heads,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=GPU_DEVICE,
+    )
+    key = torch.randn(
+        num_pages,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=GPU_DEVICE,
+    )
+    value = torch.randn_like(key)
+
+    key_fp8, key_scale = to_float8(key)
+    (_, value_fp4), (_, value_block_scales), _, value_scale = (
+        nvfp4_quantize_paged_kv_cache(value, value, kv_layout="HND")
+    )
+    assert key_fp8.element_size() == 1
+    assert value_fp4.element_size() == 1
+    assert key_fp8.shape[-1] == head_dim
+    assert value_fp4.shape[-1] == head_dim // 2
+
+    block_tables = torch.arange(
+        num_pages, dtype=torch.int32, device=GPU_DEVICE
+    ).reshape(batch_size, pages_per_seq)
+    max_seq_len = pages_per_seq * page_size
+    seq_lens = torch.tensor(
+        [max_seq_len - page_size, max_seq_len],
+        dtype=torch.int32,
+        device=GPU_DEVICE,
+    )
+    workspace = torch.zeros(workspace_size, dtype=torch.uint8, device=GPU_DEVICE)
+
+    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+        query,
+        (key_fp8, value_fp4),
+        workspace,
+        block_tables,
+        seq_lens,
+        int(seq_lens.max().item()),
+        bmm1_scale=float(key_scale.item()) / math.sqrt(head_dim),
+        bmm2_scale=value_scale,
+        out_dtype=torch.bfloat16,
+        backend="trtllm-gen",
+        kv_layout="HND",
+        kv_cache_sf=(None, value_block_scales),
+    )
+
+    key_ref = key_fp8.bfloat16() * key_scale
+    output_ref = []
+    for batch_idx, seq_len in enumerate(seq_lens.tolist()):
+        page_ids = block_tables[batch_idx, : math.ceil(seq_len / page_size)]
+        key_seq = (
+            key_ref[page_ids]
+            .permute(1, 0, 2, 3)
+            .reshape(num_kv_heads, -1, head_dim)[:, :seq_len]
+            .repeat_interleave(head_group_size, dim=0)
+            .float()
+        )
+        value_seq = (
+            value[page_ids]
+            .permute(1, 0, 2, 3)
+            .reshape(num_kv_heads, -1, head_dim)[:, :seq_len]
+            .repeat_interleave(head_group_size, dim=0)
+            .float()
+        )
+        logits = torch.einsum("hd,hnd->hn", query[batch_idx].float(), key_seq)
+        probs = torch.softmax(logits / math.sqrt(head_dim), dim=-1)
+        output_ref.append(torch.einsum("hn,hnd->hd", probs, value_seq))
+    output_ref = torch.stack(output_ref)
+
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().reshape(-1), output_ref.reshape(-1), dim=0
+    )
+    assert cosine.item() > 0.97
