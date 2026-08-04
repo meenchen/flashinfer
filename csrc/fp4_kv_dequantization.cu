@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// FP4 KV cache dequantization kernels with linear (non-swizzled) block scale layout.
+// FP4 KV cache dequantization kernels.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -181,6 +181,67 @@ __global__ void nvfp4_paged_dequant_kernel(
           __float22bfloat162_rn(make_float2(out0, out1));
     } else if constexpr (std::is_same_v<OutType, half>) {
       *reinterpret_cast<half2*>(&row_output[col]) = __float22half2_rn(make_float2(out0, out1));
+    }
+  }
+}
+
+template <typename IdType>
+__global__ void nvfp4_pages_to_fp8_kernel(
+    const uint8_t* __restrict__ paged_cache, const uint8_t* __restrict__ paged_scales,
+    const IdType* __restrict__ page_indices, const int32_t* __restrict__ num_active_pages,
+    uint8_t* __restrict__ output, const int max_page_indices, const int num_pages,
+    const int page_size, const int num_heads, const int head_dim,
+    const int64_t cache_stride_page, const int64_t cache_stride_n,
+    const int64_t cache_stride_h, const int64_t scale_stride_page,
+    const int64_t scale_stride_n, const int64_t scale_stride_h,
+    const int64_t output_stride_page, const int64_t output_stride_n,
+    const int64_t output_stride_h, const bool swizzled_scales) {
+  const int packed_dim = head_dim / 2;
+  const int scale_dim = head_dim / NVFP4_BLOCK_SIZE;
+  const int values_per_page = page_size * num_heads * packed_dim;
+  const int active_pages = min(*num_active_pages, max_page_indices);
+
+  // A fixed launch grid keeps this operation CUDA-graph replayable while the
+  // device-side active page count grows during decoding.
+  for (int page_pos = blockIdx.x; page_pos < active_pages; page_pos += gridDim.x) {
+    const IdType page = page_indices[page_pos];
+    if (page < 0 || page >= num_pages) continue;
+
+    for (int linear = threadIdx.x; linear < values_per_page; linear += blockDim.x) {
+      const int packed_col = linear % packed_dim;
+      const int token_head = linear / packed_dim;
+      const int head = token_head % num_heads;
+      const int token = token_head / num_heads;
+      const int col = packed_col * 2;
+      const int scale_idx = col / NVFP4_BLOCK_SIZE;
+
+      const int64_t cache_offset = static_cast<int64_t>(page) * cache_stride_page +
+                                   static_cast<int64_t>(token) * cache_stride_n +
+                                   static_cast<int64_t>(head) * cache_stride_h + packed_col;
+
+      int scale_token = token;
+      int scale_col = scale_idx;
+      if (swizzled_scales) {
+        const int scale_group = scale_dim / 4;
+        scale_token = (token / 4) * 4 + scale_idx / scale_group;
+        scale_col = (scale_idx % scale_group) * 4 + token % 4;
+      }
+      const int64_t scale_offset = static_cast<int64_t>(page) * scale_stride_page +
+                                   static_cast<int64_t>(scale_token) * scale_stride_n +
+                                   static_cast<int64_t>(head) * scale_stride_h + scale_col;
+
+      const uint8_t packed_fp4 = paged_cache[cache_offset];
+      const uint8_t scale_fp8 = paged_scales[scale_offset];
+      const float scale =
+          static_cast<float>(*reinterpret_cast<const __nv_fp8_e4m3*>(&scale_fp8));
+      const float out0 = E2M1_LUT[packed_fp4 & 0xF] * scale;
+      const float out1 = E2M1_LUT[(packed_fp4 >> 4) & 0xF] * scale;
+
+      const int64_t output_offset = static_cast<int64_t>(page) * output_stride_page +
+                                    static_cast<int64_t>(token) * output_stride_n +
+                                    static_cast<int64_t>(head) * output_stride_h + col;
+      output[output_offset] = __nv_cvt_float_to_fp8(out0, __NV_SATFINITE, __NV_E4M3);
+      output[output_offset + 1] = __nv_cvt_float_to_fp8(out1, __NV_SATFINITE, __NV_E4M3);
     }
   }
 }
@@ -412,5 +473,96 @@ void nvfp4_paged_kv_dequant(TensorView paged_k_cache, TensorView paged_v_cache, 
   });
 }
 
+void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_scales,
+                                      TensorView page_indices, TensorView num_active_pages,
+                                      TensorView output, int64_t kv_layout,
+                                      int64_t sf_layout) {
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(paged_cache);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(paged_scales);
+  CHECK_CUDA(page_indices);
+  CHECK_INPUT(num_active_pages);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(output);
+
+  TVM_FFI_ICHECK(kv_layout == 0 || kv_layout == 1) << "kv_layout must be 0 (NHD) or 1 (HND)";
+  TVM_FFI_ICHECK(sf_layout == 0 || sf_layout == 1)
+      << "sf_layout must be 0 (linear) or 1 (swizzled_4x4)";
+  TVM_FFI_ICHECK(paged_cache.ndim() == 4) << "paged_cache must be 4D";
+  TVM_FFI_ICHECK(paged_scales.ndim() == 4) << "paged_scales must be 4D";
+  TVM_FFI_ICHECK(output.ndim() == 4) << "output must be 4D";
+  TVM_FFI_ICHECK(page_indices.ndim() == 1) << "page_indices must be 1D";
+  TVM_FFI_ICHECK(num_active_pages.ndim() == 1 && num_active_pages.numel() == 1)
+      << "num_active_pages must be a one-element tensor";
+
+  TVM_FFI_ICHECK(paged_cache.dtype() == dl_uint8) << "paged_cache must have dtype uint8";
+  TVM_FFI_ICHECK(paged_scales.dtype() == dl_float8_e4m3fn || paged_scales.dtype() == dl_uint8)
+      << "paged_scales must have dtype float8_e4m3fn or uint8";
+  TVM_FFI_ICHECK(page_indices.dtype() == dl_int32 || page_indices.dtype() == dl_int64)
+      << "page_indices must have dtype int32 or int64";
+  TVM_FFI_ICHECK(num_active_pages.dtype() == dl_int32)
+      << "num_active_pages must have dtype int32";
+  TVM_FFI_ICHECK(output.dtype() == dl_float8_e4m3fn)
+      << "output must have dtype float8_e4m3fn";
+
+  const int num_pages = paged_cache.size(0);
+  const int page_size = kv_layout == 0 ? paged_cache.size(1) : paged_cache.size(2);
+  const int num_heads = kv_layout == 0 ? paged_cache.size(2) : paged_cache.size(1);
+  const int packed_dim = paged_cache.size(3);
+  const int head_dim = packed_dim * 2;
+  const int scale_dim = head_dim / NVFP4_BLOCK_SIZE;
+
+  TVM_FFI_ICHECK(head_dim % NVFP4_BLOCK_SIZE == 0)
+      << "head_dim must be divisible by " << NVFP4_BLOCK_SIZE;
+  TVM_FFI_ICHECK(sf_layout == 0 || (page_size % 4 == 0 && scale_dim % 4 == 0))
+      << "swizzled_4x4 scales require page_size and scale_dim divisible by 4";
+  TVM_FFI_ICHECK(output.size(0) == num_pages) << "output page count mismatch";
+  TVM_FFI_ICHECK(output.size(1) == (kv_layout == 0 ? page_size : num_heads))
+      << "output dimension 1 mismatch";
+  TVM_FFI_ICHECK(output.size(2) == (kv_layout == 0 ? num_heads : page_size))
+      << "output dimension 2 mismatch";
+  TVM_FFI_ICHECK(output.size(3) == head_dim) << "output head_dim mismatch";
+  TVM_FFI_ICHECK(paged_scales.size(0) == num_pages) << "scale page count mismatch";
+  TVM_FFI_ICHECK(paged_scales.size(1) == (kv_layout == 0 ? page_size : num_heads))
+      << "scale dimension 1 mismatch";
+  TVM_FFI_ICHECK(paged_scales.size(2) == (kv_layout == 0 ? num_heads : page_size))
+      << "scale dimension 2 mismatch";
+  TVM_FFI_ICHECK(paged_scales.size(3) == scale_dim) << "scale head_dim mismatch";
+
+  CHECK_DEVICE(paged_cache, paged_scales);
+  CHECK_DEVICE(paged_cache, page_indices);
+  CHECK_DEVICE(paged_cache, num_active_pages);
+  CHECK_DEVICE(paged_cache, output);
+
+  const auto cache_strides = paged_cache.strides();
+  const auto scale_strides = paged_scales.strides();
+  const auto output_strides = output.strides();
+  const int64_t cache_stride_n = kv_layout == 0 ? cache_strides[1] : cache_strides[2];
+  const int64_t cache_stride_h = kv_layout == 0 ? cache_strides[2] : cache_strides[1];
+  const int64_t scale_stride_n = kv_layout == 0 ? scale_strides[1] : scale_strides[2];
+  const int64_t scale_stride_h = kv_layout == 0 ? scale_strides[2] : scale_strides[1];
+  const int64_t output_stride_n = kv_layout == 0 ? output_strides[1] : output_strides[2];
+  const int64_t output_stride_h = kv_layout == 0 ? output_strides[2] : output_strides[1];
+
+  ffi::CUDADeviceGuard device_guard(paged_cache.device().device_id);
+  cudaStream_t stream = get_stream(paged_cache.device());
+  constexpr int NUM_BLOCKS = 256;
+  constexpr int NUM_THREADS = 256;
+
+  DISPATCH_DLPACK_IDTYPE_TO_CTYPE(page_indices.dtype(), id_type, [&] {
+    nvfp4_pages_to_fp8_kernel<id_type><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
+        static_cast<const uint8_t*>(paged_cache.data_ptr()),
+        static_cast<const uint8_t*>(paged_scales.data_ptr()),
+        static_cast<const id_type*>(page_indices.data_ptr()),
+        static_cast<const int32_t*>(num_active_pages.data_ptr()),
+        static_cast<uint8_t*>(output.data_ptr()), page_indices.numel(), num_pages,
+        page_size, num_heads, head_dim, cache_strides[0], cache_stride_n,
+        cache_stride_h, scale_strides[0], scale_stride_n, scale_stride_h,
+        output_strides[0], output_stride_n, output_stride_h, sf_layout == 1);
+    FLASHINFER_CUDA_CHECK(cudaGetLastError());
+    return true;
+  });
+}
+
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_kv_dequant, nvfp4_kv_dequant);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_paged_kv_dequant, nvfp4_paged_kv_dequant);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_kv_dequantize_pages_to_fp8,
+                              nvfp4_kv_dequantize_pages_to_fp8);
