@@ -40,5 +40,6 @@ See Also
   - :func:`flashinfer.quantization.shuffle_matrix_sf_a`
   - :func:`flashinfer.quantization.nvfp4_kv_quantize`
   - :func:`flashinfer.quantization.nvfp4_kv_dequantize`
+  - :func:`flashinfer.quantization.nvfp4_kv_dequantize_pages_to_fp8`
   - :func:`flashinfer.quantization.nvfp4_quantize_paged_kv_cache`
   - :class:`flashinfer.quantization.SfLayout`

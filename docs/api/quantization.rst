@@ -61,6 +61,7 @@ linear (non-swizzled) block-scale layout.
 
 - :func:`nvfp4_kv_dequantize`: SM80+ (Ampere and later)
 - :func:`nvfp4_kv_dequantize_paged`: SM80+ (Ampere and later)
+- :func:`nvfp4_kv_dequantize_pages_to_fp8`: SM80+ (Ampere and later)
 - :func:`nvfp4_kv_quantize`: SM100+ (Blackwell and later)
 - :func:`nvfp4_quantize_paged_kv_cache`
 
@@ -70,6 +71,7 @@ linear (non-swizzled) block-scale layout.
     nvfp4_kv_quantize
     nvfp4_kv_dequantize
     nvfp4_kv_dequantize_paged
+    nvfp4_kv_dequantize_pages_to_fp8
     nvfp4_quantize_paged_kv_cache
 
 FP8 Quantization
