@@ -241,6 +241,151 @@ def test_nvfp4_kv_dequantize_paged(kv_layout, block_table_dtype, dtype, non_cont
     torch.testing.assert_close(output_v.float(), ref_v.float(), atol=1e-3, rtol=1e-3)
 
 
+def _swizzle_4x4_scales(scales_nhd):
+    page_size = scales_nhd.shape[1]
+    scale_dim = scales_nhd.shape[3]
+    scale_group = scale_dim // 4
+    output = torch.empty_like(scales_nhd)
+    for token in range(page_size):
+        for scale_idx in range(scale_dim):
+            swizzled_token = (token // 4) * 4 + scale_idx // scale_group
+            swizzled_scale = (scale_idx % scale_group) * 4 + token % 4
+            output[:, swizzled_token, :, swizzled_scale] = scales_nhd[
+                :, token, :, scale_idx
+            ]
+    return output
+
+
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"])
+@pytest.mark.parametrize("sf_layout", ["linear", "swizzled_4x4"])
+def test_nvfp4_kv_dequantize_pages_to_fp8(kv_layout, sf_layout):
+    cc = get_compute_capability()
+    if cc < 80:
+        pytest.skip(f"SM{cc} does not support FP8 E4M3 (requires SM80+)")
+
+    torch.manual_seed(17)
+    num_pages = 6
+    page_size = 16
+    num_kv_heads = 2
+    head_dim = 128
+    packed_nhd = torch.randint(
+        0,
+        256,
+        (num_pages, page_size, num_kv_heads, head_dim // 2),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    linear_scales_nhd = torch.randint(
+        1,
+        120,
+        (num_pages, page_size, num_kv_heads, head_dim // 16),
+        dtype=torch.uint8,
+        device="cuda",
+    ).view(torch.float8_e4m3fn)
+    scales_nhd = (
+        _swizzle_4x4_scales(linear_scales_nhd)
+        if sf_layout == "swizzled_4x4"
+        else linear_scales_nhd
+    )
+
+    if kv_layout == "NHD":
+        packed = packed_nhd
+        scales = scales_nhd
+        output = torch.full(
+            (num_pages, page_size, num_kv_heads, head_dim),
+            7.0,
+            dtype=torch.float8_e4m3fn,
+            device="cuda",
+        )
+    else:
+        packed = packed_nhd.permute(0, 2, 1, 3).contiguous()
+        scales = scales_nhd.permute(0, 2, 1, 3).contiguous()
+        output = torch.full(
+            (num_pages, num_kv_heads, page_size, head_dim),
+            7.0,
+            dtype=torch.float8_e4m3fn,
+            device="cuda",
+        )
+
+    page_indices = torch.tensor([4, 1, 5, 0], dtype=torch.int32, device="cuda")
+    num_active_pages = torch.tensor([2], dtype=torch.int32, device="cuda")
+    flashinfer.nvfp4_kv_dequantize_pages_to_fp8(
+        packed,
+        scales,
+        page_indices,
+        num_active_pages,
+        output,
+        kv_layout=kv_layout,
+        sf_layout=sf_layout,
+    )
+
+    output_nhd = output if kv_layout == "NHD" else output.permute(0, 2, 1, 3)
+    for page in (4, 1):
+        ref = reference_dequant(
+            packed_nhd[page].reshape(-1, head_dim // 2),
+            linear_scales_nhd[page].reshape(-1, head_dim // 16),
+            1.0,
+            torch.float32,
+        ).reshape(page_size, num_kv_heads, head_dim)
+        expected = ref.to(torch.float8_e4m3fn).float()
+        torch.testing.assert_close(output_nhd[page].float(), expected, atol=0, rtol=0)
+    for page in (0, 2, 3, 5):
+        torch.testing.assert_close(
+            output_nhd[page].float(),
+            torch.full_like(output_nhd[page].float(), 7.0),
+            atol=0,
+            rtol=0,
+        )
+
+
+def test_nvfp4_kv_dequantize_pages_to_fp8_cuda_graph_dynamic_count():
+    cc = get_compute_capability()
+    if cc < 80:
+        pytest.skip(f"SM{cc} does not support FP8 E4M3 (requires SM80+)")
+
+    num_pages = 4
+    page_size = 16
+    num_kv_heads = 1
+    head_dim = 64
+    packed = torch.zeros(
+        (num_pages, page_size, num_kv_heads, head_dim // 2),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    # E2M1 code 1 dequantizes to 0.5. A block scale of 1 keeps that value.
+    packed.fill_(0x11)
+    scales = torch.ones(
+        (num_pages, page_size, num_kv_heads, head_dim // 16),
+        dtype=torch.float8_e4m3fn,
+        device="cuda",
+    )
+    page_indices = torch.arange(num_pages, dtype=torch.int32, device="cuda")
+    num_active_pages = torch.tensor([1], dtype=torch.int32, device="cuda")
+    output = torch.zeros(
+        (num_pages, page_size, num_kv_heads, head_dim),
+        dtype=torch.float8_e4m3fn,
+        device="cuda",
+    )
+
+    def run():
+        flashinfer.nvfp4_kv_dequantize_pages_to_fp8(
+            packed, scales, page_indices, num_active_pages, output
+        )
+
+    run()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+
+    output.zero_()
+    num_active_pages.fill_(3)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.all(output[:3].float() == 0.5)
+    assert torch.count_nonzero(output[3].float()).item() == 0
+
+
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"])
 def test_nvfp4_kv_dequantize_paged_long_context(kv_layout):
     """Exercise a long single-request cached-prefill style page walk."""

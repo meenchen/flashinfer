@@ -36,6 +36,7 @@ from .quantization.fp4_quantization import (
     gen_fp4_quantization_sm121_module,
     nvfp4_kv_dequantize,
     nvfp4_kv_dequantize_paged,
+    nvfp4_kv_dequantize_pages_to_fp8,
     nvfp4_kv_quantize,
     # Private functions needed by some tests
     _pad_scale_factors,
@@ -69,6 +70,7 @@ __all__ = [
     "gen_fp4_quantization_sm121_module",
     "nvfp4_kv_dequantize",
     "nvfp4_kv_dequantize_paged",
+    "nvfp4_kv_dequantize_pages_to_fp8",
     "nvfp4_kv_quantize",
     "_pad_scale_factors",
     "_compute_swizzled_layout_sf_size",
