@@ -22,8 +22,6 @@
 // #include "tensorrt_llm/common/logger.h"
 // #include "tensorrt_llm/common/tllmException.h"
 
-#include <cublasLt.h>
-#include <cublas_v2.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <driver_types.h>
