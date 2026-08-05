@@ -144,8 +144,10 @@ constexpr bool grpLoadV = GRP_LOAD_V;
 // number of shared memory buffers for latency hiding
 constexpr uint32_t nbQBuffers = mha::min(nbPartsPerInputQHead, 2u);  // for latency hiding
 constexpr uint32_t nbKBuffers = 2;                                   // for latency hiding
-constexpr uint32_t nbVBuffers =
-    2;  // @fixme: H100 SXM need more in-flight requests. may need to increase this.
+#ifndef XQA_NB_V_BUFFERS
+#define XQA_NB_V_BUFFERS 2
+#endif
+constexpr uint32_t nbVBuffers = XQA_NB_V_BUFFERS;
 constexpr uint32_t nbXBuffers = 1;
 
 __device__ inline uint3 getWarpIdx(Warp const& warp = this_warp()) {

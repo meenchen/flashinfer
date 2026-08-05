@@ -145,7 +145,11 @@ def gen_xqa_module(
     target_archs = compilation_context.TARGET_CUDA_ARCHS
     use_sm103_mixed_tuning = mixed_kv and target_archs == {(10, "3a")}
     flag_xqa_tuning = (
-        ["-DXQA_CTA_SHAPE_X=6", "-DXQA_CACHE_V_TILE_SEQ_LEN=64"]
+        [
+            "-DXQA_CTA_SHAPE_X=6",
+            "-DXQA_CACHE_V_TILE_SEQ_LEN=64",
+            "-DXQA_NB_V_BUFFERS=1",
+        ]
         if use_sm103_mixed_tuning
         else []
     )
@@ -193,7 +197,7 @@ def gen_xqa_module(
     # (i.e. it suppressed the SPEC_Q_SEQ_LEN specialization above).
     ragged_suffix = "_ragged_q" if ragged_changes_flags else ""
     implementation_suffix = "_packaged_cubin" if use_mixed_cubin else ""
-    tuning_suffix = "_cta6" if use_sm103_mixed_tuning else ""
+    tuning_suffix = "_cta6_vbuf1" if use_sm103_mixed_tuning else ""
     kv_name = (
         "fp8_k_nvfp4_v"
         if mixed_kv
