@@ -75,11 +75,10 @@ constexpr bool enableMicroFastPath = false;
 // x: horizontal stacking for cta horizontal tile size
 // y: vertical stacking for cta vertical tile size
 // z: must be 2 for warp specialization.
-#if K_CACHE_ELEM_ENUM == 2 && V_CACHE_ELEM_ENUM == 3
-constexpr uint3 ctaShapeInWarps = {6, 1, 2};
-#else
-constexpr uint3 ctaShapeInWarps = {4, 1, 2};
+#ifndef XQA_CTA_SHAPE_X
+#define XQA_CTA_SHAPE_X 4
 #endif
+constexpr uint3 ctaShapeInWarps = {XQA_CTA_SHAPE_X, 1, 2};
 
 static_assert(ctaShapeInWarps.z == 2);  // for warp specialization
 constexpr uint32_t nbWarpsPerCta = ctaShapeInWarps.x * ctaShapeInWarps.y * ctaShapeInWarps.z;
@@ -107,7 +106,11 @@ constexpr uint32_t cvtExpansion = exactDiv(inputElemSize, cacheElemSize);
 
 #ifndef __CUDA_ARCH__
 constexpr uint32_t preferedKHeadPartBytes = 64;
+#ifdef XQA_CACHE_V_TILE_SEQ_LEN
+__constant__ constexpr uint32_t cacheVTileSeqLen = XQA_CACHE_V_TILE_SEQ_LEN;
+#else
 __constant__ constexpr uint32_t cacheVTileSeqLen = 32;
+#endif
 #else
 #if __CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 890 || __CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 1210
 constexpr uint32_t preferedKHeadPartBytes = 64;

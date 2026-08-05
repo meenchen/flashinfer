@@ -143,6 +143,12 @@ def gen_xqa_module(
     )
     sm_nvcc_flags = nvcc_flags
     target_archs = compilation_context.TARGET_CUDA_ARCHS
+    use_sm103_mixed_tuning = mixed_kv and target_archs == {(10, "3a")}
+    flag_xqa_tuning = (
+        ["-DXQA_CTA_SHAPE_X=6", "-DXQA_CACHE_V_TILE_SEQ_LEN=64"]
+        if use_sm103_mixed_tuning
+        else []
+    )
 
     flag_mla_wrapper = ["-DMLA_WRAPPER=0"]
 
@@ -187,6 +193,7 @@ def gen_xqa_module(
     # (i.e. it suppressed the SPEC_Q_SEQ_LEN specialization above).
     ragged_suffix = "_ragged_q" if ragged_changes_flags else ""
     implementation_suffix = "_packaged_cubin" if use_mixed_cubin else ""
+    tuning_suffix = "_cta6" if use_sm103_mixed_tuning else ""
     kv_name = (
         "fp8_k_nvfp4_v"
         if mixed_kv
@@ -197,7 +204,7 @@ def gen_xqa_module(
         f"output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_"
         f"head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_"
         f"use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_"
-        f"spec_q_seq_len_{q_seq_len}{ragged_suffix}{implementation_suffix}",
+        f"spec_q_seq_len_{q_seq_len}{ragged_suffix}{implementation_suffix}{tuning_suffix}",
         sources,
         extra_cuda_cflags=xqa_nvcc_flags
         + sm_nvcc_flags
@@ -211,7 +218,8 @@ def gen_xqa_module(
         + flag_spec_dec
         + flag_mla_wrapper
         + flag_sm90_mha
-        + flag_mixed_cubin,
+        + flag_mixed_cubin
+        + flag_xqa_tuning,
         extra_ldflags=["-lcuda"],  # Add CUDA Driver API library
     )
 
