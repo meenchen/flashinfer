@@ -99,6 +99,9 @@ from .hash_topk import gen_hash_topk_module as gen_hash_topk_module
 from .fp4_kv_dequantization import (
     gen_fp4_kv_dequantization_module as gen_fp4_kv_dequantization_module,
 )
+from .fp4_kv_dequantization import (
+    gen_nvfp4_kv_pages_to_fp8_module as gen_nvfp4_kv_pages_to_fp8_module,
+)
 from .fp4_kv_quantization import (
     gen_fp4_kv_quantization_module as gen_fp4_kv_quantization_module,
 )
