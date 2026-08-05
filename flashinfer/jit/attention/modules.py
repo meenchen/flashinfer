@@ -1860,7 +1860,7 @@ def gen_fmha_cutlass_sm100a_module(
     )
 
 
-def gen_trtllm_gen_fmha_module():
+def _gen_trtllm_gen_fmha_module(name: str):
     from ...artifacts import ArtifactPath, CheckSumHash
 
     include_path = f"{ArtifactPath.TRTLLM_GEN_FMHA}/include"
@@ -1882,7 +1882,7 @@ def gen_trtllm_gen_fmha_module():
     assert metainfo, f"{header_name}.h not found"
 
     return gen_jit_spec(
-        "fmha_gen",
+        name,
         [
             jit_env.FLASHINFER_CSRC_DIR / "trtllm_fmha_kernel_launcher.cu",
             jit_env.FLASHINFER_CSRC_DIR / "fmhaReduction.cu",
@@ -1897,6 +1897,14 @@ def gen_trtllm_gen_fmha_module():
             f'-DTLLM_GEN_FMHA_METAINFO_HASH=\\"{meta_hash}\\"',
         ],
     )
+
+
+def gen_trtllm_gen_fmha_module():
+    return _gen_trtllm_gen_fmha_module("fmha_gen")
+
+
+def gen_trtllm_gen_mixed_kv_fmha_module():
+    return _gen_trtllm_gen_fmha_module("fmha_gen_mixed_kv")
 
 
 def gen_customize_batch_attention_module(

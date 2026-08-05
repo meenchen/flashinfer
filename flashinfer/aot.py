@@ -44,6 +44,7 @@ from .jit.attention import (
     gen_single_decode_module,
     gen_single_prefill_module,
     gen_trtllm_gen_fmha_module,
+    gen_trtllm_gen_mixed_kv_fmha_module,
     gen_trtllm_fmha_v2_sm120_module,
 )
 from .jit.attention.utils import _is_nvfp4_kv_dtype
@@ -405,6 +406,7 @@ def gen_attention(
 
         # trtllm_gen_fmha
         yield gen_trtllm_gen_fmha_module()
+        yield gen_trtllm_gen_mixed_kv_fmha_module()
 
     # MLA
     # NOTE: fp8 kv not supported in MLA

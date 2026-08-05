@@ -49,6 +49,7 @@ from .jit import (
     get_single_decode_uri,
     setup_cubin_loader,
     gen_trtllm_gen_fmha_module,
+    gen_trtllm_gen_mixed_kv_fmha_module,
 )
 from .page import get_seq_lens
 from .prefill import (
@@ -388,6 +389,14 @@ def get_batch_decode_module(*args):
 @functools.cache
 def get_trtllm_gen_fmha_module():
     mod = gen_trtllm_gen_fmha_module()
+    op = mod.build_and_load()
+    setup_cubin_loader(mod.get_library_path())
+    return op
+
+
+@functools.cache
+def get_trtllm_gen_mixed_kv_fmha_module():
+    mod = gen_trtllm_gen_mixed_kv_fmha_module()
     op = mod.build_and_load()
     setup_cubin_loader(mod.get_library_path())
     return op
@@ -3343,7 +3352,12 @@ def trtllm_batch_decode_with_kv_cache(
                 assert v_block_scales is not None
                 v_block_scales = v_block_scales.transpose(-3, -2).contiguous()
 
-        run_func = get_trtllm_gen_fmha_module().trtllm_paged_attention_decode
+        module = (
+            get_trtllm_gen_mixed_kv_fmha_module()
+            if k_cache.dtype != v_cache.dtype
+            else get_trtllm_gen_fmha_module()
+        )
+        run_func = module.trtllm_paged_attention_decode
         sm_count = get_device_sm_count(query.device)
 
         if out_dtype == "nvfp4" or (out_dtype is None and isinstance(out, FP4Tensor)):
