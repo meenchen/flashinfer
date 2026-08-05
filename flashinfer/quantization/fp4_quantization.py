@@ -2011,6 +2011,18 @@ def get_fp4_kv_dequantization_module():
     ) -> None:
         pass
 
+    return SimpleNamespace(
+        nvfp4_kv_dequant=nvfp4_kv_dequant,
+        nvfp4_paged_kv_dequant=nvfp4_paged_kv_dequant,
+    )
+
+
+@functools.cache
+def get_nvfp4_kv_pages_to_fp8_module():
+    from ..jit.fp4_kv_dequantization import gen_nvfp4_kv_pages_to_fp8_module
+
+    module = gen_nvfp4_kv_pages_to_fp8_module().build_and_load()
+
     @register_custom_op(
         "flashinfer::nvfp4_kv_dequantize_pages_to_fp8",
         mutates_args=("output",),
@@ -2047,8 +2059,6 @@ def get_fp4_kv_dequantization_module():
         pass
 
     return SimpleNamespace(
-        nvfp4_kv_dequant=nvfp4_kv_dequant,
-        nvfp4_paged_kv_dequant=nvfp4_paged_kv_dequant,
         nvfp4_kv_dequantize_pages_to_fp8=nvfp4_kv_dequantize_pages_to_fp8,
     )
 
@@ -2315,7 +2325,7 @@ def nvfp4_kv_dequantize_pages_to_fp8(
 
     layout_code = 0 if kv_layout == "NHD" else 1
     sf_layout_code = 0 if sf_layout == "linear" else 1
-    get_fp4_kv_dequantization_module().nvfp4_kv_dequantize_pages_to_fp8(
+    get_nvfp4_kv_pages_to_fp8_module().nvfp4_kv_dequantize_pages_to_fp8(
         paged_cache,
         paged_scales,
         page_indices,
