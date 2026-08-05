@@ -75,7 +75,11 @@ constexpr bool enableMicroFastPath = false;
 // x: horizontal stacking for cta horizontal tile size
 // y: vertical stacking for cta vertical tile size
 // z: must be 2 for warp specialization.
+#if K_CACHE_ELEM_ENUM == 2 && V_CACHE_ELEM_ENUM == 3
+constexpr uint3 ctaShapeInWarps = {6, 1, 2};
+#else
 constexpr uint3 ctaShapeInWarps = {4, 1, 2};
+#endif
 
 static_assert(ctaShapeInWarps.z == 2);  // for warp specialization
 constexpr uint32_t nbWarpsPerCta = ctaShapeInWarps.x * ctaShapeInWarps.y * ctaShapeInWarps.z;
