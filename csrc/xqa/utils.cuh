@@ -730,28 +730,6 @@ __device__ inline uint32_t convertF16x2WordToBF16x2(uint32_t data) {
   return reinterpret_cast<uint32_t&>(bf16);
 }
 
-__device__ inline Vec<uint32_t, 2> convertE2M1x4ToBF16x4(uint32_t unpacked) {
-  Vec<uint32_t, 2> ret;
-  asm("{\n"
-      ".reg .b32 shifted, packed, sign, sign_idx, mag, base, upper, sign_bits, value;\n"
-      "shr.u32 shifted, %2, 4;\n"
-      "or.b32 shifted, %2, shifted;\n"
-      "prmt.b32 packed, shifted, 0, 0x4420;\n"
-      "and.b32 sign, packed, 0x88888888;\n"
-      "shr.u32 sign_idx, sign, 3;\n"
-      "and.b32 mag, packed, 0x77777777;\n"
-      "prmt.b32 base, 0xc0800000, 0xc0804000, mag;\n"
-      "prmt.b32 upper, 0x3f3f3f00, 0x40404040, mag;\n"
-      "prmt.b32 sign_bits, 0x00008000, 0, sign_idx;\n"
-      "or.b32 value, upper, sign_bits;\n"
-      "prmt.b32 %0, base, value, 0x5140;\n"
-      "prmt.b32 %1, base, value, 0x7362;\n"
-      "}"
-      : "=r"(ret[0]), "=r"(ret[1])
-      : "r"(unpacked));
-  return ret;
-}
-
 template <typename InputElem, typename CacheElem>
 __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16(uint32_t i8data) {
   static_assert(mha::is_same_v<InputElem, half> || mha::is_same_v<InputElem, __nv_bfloat16>,
@@ -844,7 +822,19 @@ __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<__nv_bfloat16, __nv_fp
       : "=r"(dst[0]), "=r"(dst[1])
       : "r"(src));
 #else
-  ret = convertE2M1x4ToBF16x4(i8data);
+  // Fallback: convert e2m1 -> fp16 -> bf16
+  uint32_t src = i8data | (i8data >> 4);
+  uint32_t fp16[2];
+  asm("{\n"
+      ".reg .b8 byte0, byte2;\n"
+      "mov.b32 {byte0, _, byte2, _}, %2;\n"
+      "cvt.rn.f16x2.e2m1x2 %0, byte0;\n"
+      "cvt.rn.f16x2.e2m1x2 %1, byte2;\n"
+      "}"
+      : "=r"(fp16[0]), "=r"(fp16[1])
+      : "r"(src));
+  ret[0] = convertF16x2WordToBF16x2(fp16[0]);
+  ret[1] = convertF16x2WordToBF16x2(fp16[1]);
 #endif
 #else
   assert(!"need arch >= 1000");
