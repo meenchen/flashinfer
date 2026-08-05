@@ -51,6 +51,7 @@ def main() -> None:
         dtype=torch.bfloat16,
         device=device,
     )
+    query_fp8 = query.to(torch.float8_e4m3fn)
     key_cache = (
         torch.randn(
             num_pages,
@@ -82,6 +83,17 @@ def main() -> None:
         dtype=torch.float8_e4m3fn,
         device=device,
     )
+    value_cache_fp8 = (
+        torch.randn(
+            num_pages,
+            args.num_kv_heads,
+            args.page_size,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        / 4
+    ).to(torch.float8_e4m3fn)
     block_tables = torch.arange(
         num_pages, dtype=torch.int32, device=device
     ).reshape(args.batch_size, pages_per_seq)
@@ -103,6 +115,7 @@ def main() -> None:
         device=device,
     )
     output_trtllm = torch.empty_like(query)
+    output_fp8_kv = torch.empty_like(query)
     k_scale = torch.ones(1, dtype=torch.float32, device=device)
     v_scale = torch.ones(1, dtype=torch.float32, device=device)
 
@@ -122,6 +135,25 @@ def main() -> None:
             enable_pdl=True,
             backend="trtllm-gen",
             kv_cache_sf=(None, value_scales),
+        )
+
+    def run_fp8_kv() -> None:
+        # E4M3 Q/K/V makes both TRTLLM-gen MMAs use E4M3 operands. Query
+        # quantization is intentionally outside this focused kernel timing.
+        trtllm_batch_decode_with_kv_cache(
+            query=query_fp8,
+            kv_cache=(key_cache, value_cache_fp8),
+            workspace_buffer=workspace,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            max_seq_len=args.seq_len,
+            bmm1_scale=1 / math.sqrt(head_dim),
+            bmm2_scale=1.0,
+            out=output_fp8_kv,
+            out_dtype=torch.bfloat16,
+            kv_layout="HND",
+            enable_pdl=True,
+            backend="trtllm-gen",
         )
 
     if args.profile_backend is not None:
@@ -169,6 +201,7 @@ def main() -> None:
         return
 
     native_ms = _bench(run_trtllm)
+    fp8_kv_ms = _bench(run_fp8_kv)
     rows = []
     for splits in args.splits:
         # XQA derives its split count by floor(sm_count / (batch * kv_heads)).
@@ -207,7 +240,11 @@ def main() -> None:
                 "synthetic_sm_count": synthetic_sm_count,
                 "xqa_ms": xqa_ms,
                 "trtllm_gen_ms": native_ms,
+                "fp8_kv_trtllm_gen_ms": fp8_kv_ms,
                 "delta_pct": 100 * (xqa_ms / native_ms - 1),
+                "xqa_vs_fp8_kv_pct": 100 * (xqa_ms / fp8_kv_ms - 1),
+                "mixed_trtllm_vs_fp8_kv_pct": 100
+                * (native_ms / fp8_kv_ms - 1),
                 "cosine": cosine,
             }
         )
@@ -222,6 +259,8 @@ def main() -> None:
                 "num_kv_heads": args.num_kv_heads,
                 "head_group_size": args.head_group_size,
                 "page_size": args.page_size,
+                "fp8_kv_mma": "E4M3 x E4M3 for BMM1 and BMM2",
+                "fp8_kv_query_quantization_in_timing": False,
                 "results": rows,
             },
             indent=2,
