@@ -143,7 +143,17 @@ def gen_xqa_module(
     )
     sm_nvcc_flags = nvcc_flags
     target_archs = compilation_context.TARGET_CUDA_ARCHS
-    use_sm103_mixed_tuning = mixed_kv and target_archs == {(10, "3a")}
+    use_sm103_mixed_tuning = (
+        mixed_kv
+        and input_dtype == torch.bfloat16
+        and output_dtype == torch.bfloat16
+        and page_size == 64
+        and head_dim == 128
+        and head_group_ratio == 4
+        and not use_sliding_window
+        and q_seq_len == 1
+        and target_archs == {(10, "3a")}
+    )
     flag_xqa_tuning = (
         [
             "-DXQA_CTA_SHAPE_X=6",
