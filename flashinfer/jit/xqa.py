@@ -154,6 +154,10 @@ def gen_xqa_module(
         and q_seq_len == 1
         and target_archs == {(10, "3a")}
     )
+    use_mixed_fp8_mma = (
+        use_sm103_mixed_tuning
+        and os.getenv("FLASHINFER_XQA_MIXED_FP8_MMA") == "1"
+    )
     flag_xqa_tuning = (
         [
             "-DXQA_CTA_SHAPE_X=6",
@@ -162,6 +166,7 @@ def gen_xqa_module(
         if use_sm103_mixed_tuning
         else []
     )
+    flag_mixed_fp8_mma = ["-DXQA_MIXED_FP8_MMA=1"] if use_mixed_fp8_mma else []
 
     flag_mla_wrapper = ["-DMLA_WRAPPER=0"]
 
@@ -207,6 +212,7 @@ def gen_xqa_module(
     ragged_suffix = "_ragged_q" if ragged_changes_flags else ""
     implementation_suffix = "_packaged_cubin" if use_mixed_cubin else ""
     tuning_suffix = "_cta6_lb" if use_sm103_mixed_tuning else ""
+    fp8_mma_suffix = "_fp8_mma" if use_mixed_fp8_mma else ""
     kv_name = (
         "fp8_k_nvfp4_v"
         if mixed_kv
@@ -217,7 +223,8 @@ def gen_xqa_module(
         f"output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_"
         f"head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_"
         f"use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_"
-        f"spec_q_seq_len_{q_seq_len}{ragged_suffix}{implementation_suffix}{tuning_suffix}",
+        f"spec_q_seq_len_{q_seq_len}{ragged_suffix}{implementation_suffix}{tuning_suffix}"
+        f"{fp8_mma_suffix}",
         sources,
         extra_cuda_cflags=xqa_nvcc_flags
         + sm_nvcc_flags
@@ -232,7 +239,8 @@ def gen_xqa_module(
         + flag_mla_wrapper
         + flag_sm90_mha
         + flag_mixed_cubin
-        + flag_xqa_tuning,
+        + flag_xqa_tuning
+        + flag_mixed_fp8_mma,
         extra_ldflags=["-lcuda"],  # Add CUDA Driver API library
     )
 

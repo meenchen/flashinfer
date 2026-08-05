@@ -919,6 +919,35 @@ struct InstInMat {
   uint32_t data[kEx][mnEx];
 };
 
+#if XQA_MIXED_FP8_MMA
+static_assert(MIXED_KV_CACHE && K_CACHE_ELEM_ENUM == 2 && V_CACHE_ELEM_ENUM == 3,
+              "FP8 MMA is implemented only for FP8-K/NVFP4-V");
+static_assert(!INPUT_FP16, "FP8 MMA prototype currently supports BF16 input only");
+
+__device__ inline uint16_t inputWordToFp8x2(uint32_t src, float scale = 1.F) {
+  float2 values = __bfloat1622float2(reinterpret_cast<__nv_bfloat162 const&>(src));
+  values.x *= scale;
+  values.y *= scale;
+  return __nv_cvt_float2_to_fp8x2(values, __NV_SATFINITE, __NV_E4M3);
+}
+
+__device__ inline uint32_t packInputWordsToFp8x4(uint32_t lo, uint32_t hi,
+                                                 float scale = 1.F) {
+  return uint32_t(inputWordToFp8x2(lo, scale)) |
+         (uint32_t(inputWordToFp8x2(hi, scale)) << 16);
+}
+
+__device__ inline void inputMatToFp8A(InstInMat<2, 2> const& src, uint32_t (&dst)[2],
+                                      float scale = 1.F) {
+  dst[0] = packInputWordsToFp8x4(src.data[0][0], src.data[1][0], scale);
+  dst[1] = packInputWordsToFp8x4(src.data[0][1], src.data[1][1], scale);
+}
+
+__device__ inline uint32_t inputMatToFp8B(uint32_t const (&src)[2], float scale = 1.F) {
+  return packInputWordsToFp8x4(src[0], src[1], scale);
+}
+#endif
+
 template <uint32_t kEx, uint32_t mnEx, bool transOuter>
 using InstInMatWTrans = InstInMat<transOuter ? mnEx : kEx, transOuter ? kEx : mnEx>;
 
@@ -1131,11 +1160,21 @@ __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
 #pragma unroll
       for (uint32_t j = 0; j < kSliceRows; j++) {
         InstInMat<kEx, mnEx> const matrixA = qSlice(i, 0);
+#if XQA_MIXED_FP8_MMA
+        static_assert(mha::is_same_v<KElemType, __nv_fp8_e4m3>);
+        uint32_t aFp8[2];
+        inputMatToFp8A(matrixA, aFp8);
+#else
         InstInMat<mnExK, kEx> const matrixB = kSlice(j, 0);
+#endif
 #pragma unroll
         for (uint32_t n = 0; n < mnExK; n++) {
+#if XQA_MIXED_FP8_MMA
+          mmaF8_k16(acc(i, j * mnExK + n).data, aFp8, kSliceOrig(j, 0).data[n][0]);
+#else
           uint32_t const b[2][1] = {matrixB.data[n][0], matrixB.data[n][1]};
           mma<InputElem>(acc(i, j * mnExK + n).data, matrixA.data, b);
+#endif
         }
       }
     }
@@ -1363,13 +1402,22 @@ __device__ inline void smemXVPartGemm(Warp const& warp, WarpAcc& acc, bool skipX
 // compute
 #pragma unroll
     for (uint32_t i = 0; i < xSliceRows; i++) {
+#if XQA_MIXED_FP8_MMA
+      uint32_t xFp8[2];
+      inputMatToFp8A(xSlice(i, 0), xFp8, kE4M3_MAX);
+#endif
 #pragma unroll
       for (uint32_t j = 0; j < vSliceCols; j++) {
         auto const& vInMat = vSlice(j, 0);
 #pragma unroll
         for (uint32_t n = 0; n < mnExV; n++) {
+#if XQA_MIXED_FP8_MMA
+          uint32_t const vFp8 = inputMatToFp8B(vInMat.data[n]);
+          mmaF8_k16(acc(i, j * mnExV + n).data, xFp8, vFp8);
+#else
           mma<InputElem>(acc(i, j * mnExV + n).data, xSlice(i, 0).data,
                          reinterpret_cast<uint32_t const(&)[2][1]>(vInMat.data[n]));
+#endif
         }
       }
     }
@@ -2588,6 +2636,9 @@ CUBIN_EXPORT __global__
     }
 
     float voScale = (isVCacheQuantized ? vCacheScaleValue : 1.F);
+#if XQA_MIXED_FP8_MMA
+    voScale /= kE4M3_MAX;
+#endif
     if (seqIterInit < nbSeqIters) {  // otherwise rcpRowSum will be NAN.
       // The attention sinks are moved to the multi-block reduction part if the multi-block is
       // enabled.

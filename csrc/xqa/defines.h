@@ -120,6 +120,12 @@ static_assert(SPEC_DEC, "SPEC_Q_SEQ_LEN should only be used when SPEC_DEC is ena
 #define ENABLE_4BIT_KV_CACHE 0
 #endif
 
+// Experimental mixed-cache path: convert BF16 tiles to E4M3 in registers and
+// use FP8 MMA for both QK and PV. The persistent cache formats are unchanged.
+#ifndef XQA_MIXED_FP8_MMA
+#define XQA_MIXED_FP8_MMA 0
+#endif
+
 // don't modify
 #define USE_KV_CACHE true
 
