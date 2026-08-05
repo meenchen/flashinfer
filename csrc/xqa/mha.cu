@@ -2841,7 +2841,7 @@ CUBIN_EXPORT __device__ constexpr XQAKernelType kernelType =
     XQAKernelType::kAMPERE_WARP_SPECIALIZED;
 
 #ifdef NDEBUG
-CUBIN_EXPORT __global__ __launch_bounds__(256, nbCtaPerSM) void kernel_mha(
+CUBIN_EXPORT __global__ __launch_bounds__(ctaSize, nbCtaPerSM) void kernel_mha(
 #if SPEC_DEC
     uint32_t const qSeqLen, uint32_t const nbKHeads, uint32_t const headGrpSize,
     SeqLenDataType const* qCuSeqLens,
