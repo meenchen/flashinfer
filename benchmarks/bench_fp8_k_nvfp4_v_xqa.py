@@ -31,6 +31,10 @@ def main() -> None:
     parser.add_argument("--head-group-size", type=int, default=4)
     parser.add_argument("--page-size", type=int, default=64)
     parser.add_argument("--splits", type=int, nargs="+", default=[1, 2, 3, 4, 5])
+    parser.add_argument(
+        "--profile-backend", choices=["xqa", "trtllm-gen"], default=None
+    )
+    parser.add_argument("--profile-iterations", type=int, default=1)
     args = parser.parse_args()
 
     torch.manual_seed(0)
@@ -119,6 +123,50 @@ def main() -> None:
             backend="trtllm-gen",
             kv_cache_sf=(None, value_scales),
         )
+
+    if args.profile_backend is not None:
+        if args.profile_backend == "trtllm-gen":
+            run_profiled = run_trtllm
+        else:
+            synthetic_sm_count = 2 * args.batch_size * args.num_kv_heads
+
+            def run_profiled() -> None:
+                xqa(
+                    query.unsqueeze(1),
+                    key_cache,
+                    value_cache,
+                    block_tables,
+                    seq_lens.view(torch.uint32).unsqueeze(1),
+                    output_xqa,
+                    workspace,
+                    semaphores,
+                    args.num_kv_heads,
+                    args.page_size,
+                    k_scale=k_scale,
+                    v_scale=v_scale,
+                    kv_layout="HND",
+                    sm_count=synthetic_sm_count,
+                    enable_pdl=True,
+                    v_sf_cache=value_scales,
+                )
+
+        for _ in range(10):
+            run_profiled()
+        torch.cuda.synchronize()
+        torch.cuda.cudart().cudaProfilerStart()
+        for _ in range(args.profile_iterations):
+            run_profiled()
+        torch.cuda.cudart().cudaProfilerStop()
+        torch.cuda.synchronize()
+        print(
+            json.dumps(
+                {
+                    "profile_backend": args.profile_backend,
+                    "profile_iterations": args.profile_iterations,
+                }
+            )
+        )
+        return
 
     native_ms = _bench(run_trtllm)
     rows = []
