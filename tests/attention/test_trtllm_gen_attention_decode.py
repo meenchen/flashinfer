@@ -2094,6 +2094,7 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
     )
     value = torch.randn_like(key)
 
+    query_fp8, query_scale = to_float8(query)
     key_fp8, key_scale = to_float8(key)
     (_, value_fp4), (_, value_block_scales), _, value_scale = (
         nvfp4_quantize_paged_kv_cache(value, value, kv_layout="HND")
@@ -2115,13 +2116,14 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
     workspace = torch.zeros(workspace_size, dtype=torch.uint8, device=GPU_DEVICE)
 
     output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-        query,
+        query_fp8,
         (key_fp8, value_fp4),
         workspace,
         block_tables,
         seq_lens,
         int(seq_lens.max().item()),
-        bmm1_scale=float(key_scale.item()) / math.sqrt(head_dim),
+        bmm1_scale=float(query_scale.item() * key_scale.item())
+        / math.sqrt(head_dim),
         bmm2_scale=value_scale,
         out_dtype=torch.bfloat16,
         backend="trtllm-gen",
@@ -2129,6 +2131,7 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
         kv_cache_sf=(None, value_block_scales),
     )
 
+    query_ref = query_fp8.bfloat16() * query_scale
     key_ref = key_fp8.bfloat16() * key_scale
     output_ref = []
     for batch_idx, seq_len in enumerate(seq_lens.tolist()):
@@ -2147,7 +2150,9 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
             .repeat_interleave(head_group_size, dim=0)
             .float()
         )
-        logits = torch.einsum("hd,hnd->hn", query[batch_idx].float(), key_seq)
+        logits = torch.einsum(
+            "hd,hnd->hn", query_ref[batch_idx].float(), key_seq
+        )
         probs = torch.softmax(logits / math.sqrt(head_dim), dim=-1)
         output_ref.append(torch.einsum("hn,hnd->hd", probs, value_seq))
     output_ref = torch.stack(output_ref)

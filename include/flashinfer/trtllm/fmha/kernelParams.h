@@ -711,8 +711,22 @@ struct KernelParams {
     int32_t const numEltsInClampedHeadDimV =
         getNumEltsInClampedHeadDim(kernelMeta.mDataTypeV, options.mHeadDimV);
 
-    // Do we have to transform K/V before MMA?
-    bool const transformsKv{kernelMeta.mDataTypeK != kernelMeta.mDataTypeQ};
+    // Determine the operand dtypes presented to BMM1 and BMM2.
+    Data_type dtypeBmm2 = kernelMeta.mDataTypeK != kernelMeta.mDataTypeQ
+                              ? kernelMeta.mDataTypeQ
+                              : kernelMeta.mDataTypeV;
+    if (kernelMeta.mDataTypeK == DATA_TYPE_E4M3 &&
+        kernelMeta.mDataTypeV == DATA_TYPE_E2M1) {
+      dtypeBmm2 = DATA_TYPE_E4M3;
+    }
+    if (kernelMeta.mEnablesBf16QFp8KvKOnlyTransform) {
+      dtypeBmm2 = kernelMeta.mDataTypeV;
+    }
+    bool const transformsK{
+        kernelMeta.mDataTypeK != kernelMeta.mDataTypeQ ||
+        (kernelMeta.mSeparateTransformedKv && kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
+         kernelMeta.mDataTypeK == DATA_TYPE_E4M3 && kernelMeta.mDataTypeV == DATA_TYPE_E2M1)};
+    bool const transformsV{kernelMeta.mDataTypeV != dtypeBmm2};
     // Whether store transformed K/V in TMEM.
     bool const isSwapsMmaAb =
         isSwapsMmaAbForGenerationKernel(static_cast<FmhaKernelType>(kernelMeta.mKernelType));
@@ -720,10 +734,13 @@ struct KernelParams {
                                         kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
                                         maxHeadDimKv >= 128 && isSwapsMmaAb};
     // Whether swizzle is needed for K/V.
-    bool const swizzleKv{storeTransformedKvInTmem || !transformsKv};
+    bool const swizzleK{storeTransformedKvInTmem || !transformsK};
+    bool const swizzleV{storeTransformedKvInTmem || !transformsV};
+    bool const separateSmemKv{kernelMeta.mDataTypeK != kernelMeta.mDataTypeV ||
+                              transformsK != transformsV};
     // Whether we can reshape the TMA box for K/V to widen it to 128B.
     bool const canReshapeTmaKv{isPagedKv(options.mQkvLayout) &&
-                               options.mHeadDimQk == options.mHeadDimV && !swizzleKv &&
+                               options.mHeadDimQk == options.mHeadDimV && !swizzleK && !swizzleV &&
                                canUseTmaKvReshape(options, kernelMeta.mDataTypeK, /*isK*/ true) &&
                                canUseTmaKvReshape(options, kernelMeta.mDataTypeV, /*isK*/ false)};
     // The reshape factor for K/V TMA box: aim for 128B box width.
@@ -767,8 +784,8 @@ struct KernelParams {
       strideK = std::vector<uint64_t>{1, static_cast<uint64_t>(options.mHeadDimQk)};
       tileShapeK[1] = 1;
     }
-    if (!storeTransformedKvInTmem && kernelMeta.mDataTypeK != kernelMeta.mDataTypeV &&
-        !kernelMeta.mSeparateTransformedKv) {
+    if (!storeTransformedKvInTmem && !separateSmemKv &&
+        kernelMeta.mDataTypeK != kernelMeta.mDataTypeV) {
       // tileShapeKv is in dtypeK elements. When dtypeV != dtypeK, we need to express tileShapeV in
       // terms of dtypeV elements so the V TMA descriptor transfers the same number of bytes as K to
       // match barrier expectations.
@@ -779,7 +796,7 @@ struct KernelParams {
     // Build tma descriptor for K.
     params.tmaK_ = buildNdTmaDescriptor(
         options, kernelMeta.mDataTypeK, shapeK, strideK, tileShapeK, const_cast<void*>(kPtr),
-        /*swizzled = */ swizzleKv, /*unpack4b = */ storeTransformedKvInTmem);
+        /*swizzled = */ swizzleK, /*unpack4b = */ storeTransformedKvInTmem);
 
     bool const useSparseMlaSlidingWindowKvPool = options.mHasSlidingWindowKvPool &&
                                                  options.isSparseMla() &&
@@ -788,12 +805,12 @@ struct KernelParams {
       params.tmaKSlidingWindowKvPool_ =
           buildNdTmaDescriptor(options, kernelMeta.mDataTypeK, shapeK, strideK, tileShapeK,
                                const_cast<void*>(options.slidingWindowKvPoolPtr),
-                               /*swizzled = */ swizzleKv, /*unpack4b = */ storeTransformedKvInTmem);
+                               /*swizzled = */ swizzleK, /*unpack4b = */ storeTransformedKvInTmem);
     }
 
     params.tmaV_ = buildNdTmaDescriptor(
         options, kernelMeta.mDataTypeV, shapeV, strideV, tileShapeV, const_cast<void*>(vPtr),
-        /*swizzled = */ swizzleKv, /*unpack4b = */ storeTransformedKvInTmem);
+        /*swizzled = */ swizzleV, /*unpack4b = */ storeTransformedKvInTmem);
 
     // E2M1 inputs need independent block-scale descriptors.
     if (kernelMeta.mDataTypeK == DATA_TYPE_E2M1 || kernelMeta.mDataTypeV == DATA_TYPE_E2M1) {
