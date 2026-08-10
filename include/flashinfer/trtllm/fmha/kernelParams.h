@@ -191,6 +191,10 @@ struct KernelParams {
   // true -> vLLM/FlashInfer; false -> TRT-LLM.
   bool mUsesSharedPagedKvIdx{true};
 
+  // Runtime skip-correction threshold added to TRTLLM-gen's ABI in d89eb43c.
+  // FlashInfer does not enable threshold-based freezing, so keep it disabled.
+  float mSkipCorrThreshold{0.f};
+
   // Create the TMA shape/stride for Q.
   template <class FmhaOptions>
   static auto makeTmaShapeStrideQ(FmhaOptions const& options, bool groupsHeadsQ,
@@ -920,6 +924,7 @@ struct KernelParams {
     params.mUseBlockSparseAttention = false;
     // Whether the indices for K & V pages are shared as unified index (vLLM/FlashInfer).
     params.mUsesSharedPagedKvIdx = options.mUsesSharedPagedKvIdx;
+    params.mSkipCorrThreshold = 0.f;
     return params;
   }
 };
