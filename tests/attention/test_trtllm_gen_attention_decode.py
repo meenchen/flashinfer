@@ -1820,8 +1820,7 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
         block_tables,
         seq_lens,
         int(seq_lens.max().item()),
-        bmm1_scale=float(query_scale.item() * key_scale.item())
-        / math.sqrt(head_dim),
+        bmm1_scale=float(query_scale.item() * key_scale.item()) / math.sqrt(head_dim),
         bmm2_scale=value_scale,
         out_dtype=torch.bfloat16,
         backend="trtllm-gen",
@@ -1848,9 +1847,7 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
             .repeat_interleave(head_group_size, dim=0)
             .float()
         )
-        logits = torch.einsum(
-            "hd,hnd->hn", query_ref[batch_idx].float(), key_seq
-        )
+        logits = torch.einsum("hd,hnd->hn", query_ref[batch_idx].float(), key_seq)
         probs = torch.softmax(logits / math.sqrt(head_dim), dim=-1)
         output_ref.append(torch.einsum("hn,hnd->hd", probs, value_seq))
     output_ref = torch.stack(output_ref)
@@ -1859,3 +1856,21 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
         output.float().reshape(-1), output_ref.reshape(-1), dim=0
     )
     assert cosine.item() > 0.97
+
+    with pytest.raises(ValueError, match="q_len_per_req=1"):
+        flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            query_fp8,
+            (key_fp8, value_fp4),
+            workspace,
+            block_tables,
+            seq_lens,
+            int(seq_lens.max().item()),
+            bmm1_scale=float(query_scale.item() * key_scale.item())
+            / math.sqrt(head_dim),
+            bmm2_scale=value_scale,
+            out_dtype=torch.bfloat16,
+            backend="trtllm-gen",
+            kv_layout="HND",
+            kv_cache_sf=(None, value_block_scales),
+            q_len_per_req=2,
+        )
