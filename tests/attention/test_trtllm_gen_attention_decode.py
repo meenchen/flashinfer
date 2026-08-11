@@ -169,7 +169,7 @@ def create_kv_cache(
     num_pages_per_seq = (max_seq_len + page_size - 1) // page_size
     num_pages = num_pages_per_seq * batch_size
     ref_kv_dtype_torch = DTYPE_MAP[ref_kv_dtype]
-    if kv_dtype not in ("fp8", "nvfp4"):
+    if kv_dtype not in ("fp8", "nvfp4", "fp8_k_nvfp4_v"):
         assert kv_dtype == ref_kv_dtype, (
             "kv_dtype and ref_kv_dtype must be the same for non-fp8/nvfp4 kv_cache"
         )
@@ -237,6 +237,18 @@ def create_kv_cache(
         kv_cache, kv_cache_sf, k_scale, v_scale = nvfp4_quantize_paged_kv_cache(
             k_cache, v_cache, kv_layout=kv_layout
         )
+    elif kv_dtype == "fp8_k_nvfp4_v":
+        k_cache, k_scale = to_float8(k_cache)
+        v_ref = v_cache
+        (_, v_cache), (_, v_sf), _, v_scale = nvfp4_quantize_paged_kv_cache(
+            v_cache, v_cache, kv_layout=kv_layout
+        )
+        ref_kv_cache = torch.stack(
+            [k_cache.to(ref_kv_dtype_torch) * k_scale, v_ref],
+            dim=1,
+        )
+        kv_cache = (k_cache, v_cache)
+        kv_cache_sf = (None, v_sf)
     else:
         k_scale = v_scale = 1.0
         ref_kv_cache = torch.stack([k_cache, v_cache], dim=1)

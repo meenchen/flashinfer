@@ -231,7 +231,10 @@ void trtllm_paged_attention_launcher(
     runner_params.mMaskType =
         is_causal ? TrtllmGenAttentionMaskType::Causal : TrtllmGenAttentionMaskType::Dense;
     runner_params.mKernelType = FmhaKernelType::Context;
-    runner_params.mTileScheduler = TileScheduler::Persistent;
+    bool const is_fp8_k_nvfp4_v = k_data_type == Data_type::DATA_TYPE_E4M3 &&
+                                  v_data_type == Data_type::DATA_TYPE_E2M1;
+    runner_params.mTileScheduler =
+        is_fp8_k_nvfp4_v ? TileScheduler::Static : TileScheduler::Persistent;
     runner_params.mMultiCtasKvMode = false;
 
     runner_params.cumSeqLensQPtr = cum_seq_lens_q;

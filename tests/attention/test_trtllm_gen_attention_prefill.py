@@ -88,6 +88,11 @@ def _test_trtllm_batch_prefill(
             pytest.skip("NVFP4 KV cache requires FP8 query")
         if o_dtype != "fp8":
             pytest.skip("NVFP4 KV cache only supports FP8 output")
+    if kv_dtype == "fp8_k_nvfp4_v":
+        if q_dtype != "fp8" or o_dtype != "bf16":
+            pytest.skip("mixed KV context requires FP8 query and BF16 output")
+        if kv_layout != "HND" or not uses_shared_paged_kv_idx:
+            pytest.skip("mixed KV context currently targets the vLLM HND layout")
 
     # Set up test parameters
     torch.manual_seed(0)
@@ -234,7 +239,7 @@ def _test_trtllm_batch_prefill(
         not enable_sink
         and not skips_softmax
         and o_dtype != "nvfp4"
-        and kv_dtype != "nvfp4"
+        and kv_dtype not in ("nvfp4", "fp8_k_nvfp4_v")
         and q_dtype != "fp8"
     )
     if (return_lse or provide_lse) and not check_lse:
@@ -336,12 +341,14 @@ def _test_trtllm_batch_prefill(
 
     # NVFP4 KV cache has significant quantization error, especially with
     # outlier channels that create large per-block dynamic range.
-    if kv_dtype == "nvfp4":
+    if kv_dtype in ("nvfp4", "fp8_k_nvfp4_v"):
         rtol, atol = 5e-1, 5e-1
 
     # NVFP4 KV cache has higher mismatch rate due to 4-bit quantization noise,
     # especially with outlier channels that stress per-block scaling.
-    allowed_mismatch_rate = 0.10 if kv_dtype == "nvfp4" else 1e-7
+    allowed_mismatch_rate = (
+        0.10 if kv_dtype in ("nvfp4", "fp8_k_nvfp4_v") else 1e-7
+    )
     # Calculate max allowed mismatched elements based on tensor size
     total_elements = (output.float() * o_scale).numel()
     max_mismatched_elements = int(allowed_mismatch_rate * total_elements)
@@ -357,19 +364,21 @@ def _test_trtllm_batch_prefill(
 
     # NVFP4 KV cache: use cosine similarity to catch block-scale mismatches
     # (e.g. wrong swizzling) that element-wise tolerances miss.
-    if kv_dtype == "nvfp4":
+    if kv_dtype in ("nvfp4", "fp8_k_nvfp4_v"):
         cos = torch.nn.functional.cosine_similarity(
             (output.float() * o_scale).reshape(-1),
             output_ref.float().reshape(-1),
             dim=0,
         )
         assert cos.item() > 0.86, (
-            f"NVFP4 KV cache attention: cosine similarity {cos:.4f} < 0.86. "
+            f"NVFP4 V cache attention: cosine similarity {cos:.4f} < 0.86. "
             f"Block scale factors may be mismatched to FP4 data blocks."
         )
 
     if (
-        o_dtype != "nvfp4" and kv_dtype != "nvfp4" and uses_shared_paged_kv_idx
+        o_dtype != "nvfp4"
+        and kv_dtype not in ("nvfp4", "fp8_k_nvfp4_v")
+        and uses_shared_paged_kv_idx
     ):  # wrapper api does not support fp4 output/kv or separate KV page indices yet.
         # test wrapper with trtllm-gen backend
         wrapper_trtllm_gen = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
@@ -508,6 +517,30 @@ def test_trtllm_batch_prefill_lse_contract(return_lse, provide_lse):
         uses_shared_paged_kv_idx=True,
         return_lse=return_lse,
         provide_lse=provide_lse,
+    )
+
+
+@pytest.mark.parametrize("max_q_len,max_kv_len", [(127, 511), (511, 2047)])
+def test_trtllm_batch_prefill_fp8_k_nvfp4_v(max_q_len, max_kv_len):
+    _skip_if_not_blackwell()
+    _test_trtllm_batch_prefill(
+        "HND",
+        batch_size=4,
+        page_size=64,
+        num_kv_heads=4,
+        head_grp_size=5,
+        causal=True,
+        window_left=-1,
+        q_dtype="fp8",
+        o_dtype="bf16",
+        kv_dtype="fp8_k_nvfp4_v",
+        enable_pdl=None,
+        enable_sink=False,
+        max_q_len=max_q_len,
+        max_kv_len=max_kv_len,
+        device_scale=True,
+        head_dim=128,
+        uses_shared_paged_kv_idx=True,
     )
 
 
