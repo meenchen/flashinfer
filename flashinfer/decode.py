@@ -3263,6 +3263,7 @@ def trtllm_batch_decode_with_kv_cache(
             raise ValueError("kv_cache_sf must be provided for NVFP4 KV cache.")
     is_nvfp4_k_cache = k_cache.dtype == torch.uint8
     is_nvfp4_v_cache = v_cache.dtype == torch.uint8
+    is_fp8_k_nvfp4_v = k_cache.dtype == torch.float8_e4m3fn and is_nvfp4_v_cache
 
     k_block_scales = None
     v_block_scales = None
@@ -3443,6 +3444,41 @@ def trtllm_batch_decode_with_kv_cache(
             check_shape_dtype_device(out, query.shape, out_dtype, query.device, "out")
         else:
             raise ValueError(f"Invalid out_dtype: {out_dtype}")
+
+        if is_fp8_k_nvfp4_v:
+            if query.dtype not in (torch.float8_e4m3fn, torch.bfloat16):
+                raise ValueError("FP8-K/NVFP4-V decode requires FP8 or BF16 query")
+            if out_dtype != torch.bfloat16:
+                raise ValueError("FP8-K/NVFP4-V decode requires BF16 output")
+            if kv_layout != "HND":
+                raise ValueError("FP8-K/NVFP4-V decode currently requires HND layout")
+            if (
+                query.shape[-1] != 128
+                or k_cache.shape[-1] != 128
+                or v_cache.shape[-1] * 2 != 128
+            ):
+                raise ValueError("FP8-K/NVFP4-V decode requires head dimension 128")
+            if k_cache.shape[-2] not in (16, 32, 64, 128):
+                raise ValueError(
+                    "FP8-K/NVFP4-V decode supports page sizes 16, 32, 64, and 128"
+                )
+            if q_len_per_req != 1:
+                raise ValueError(
+                    "FP8-K/NVFP4-V decode currently requires q_len_per_req=1"
+                )
+            if (
+                window_left != -1
+                or not uses_shared_paged_kv_idx
+                or enable_block_sparse_attention
+                or skip_softmax_threshold_scale_factor is not None
+                or sinks is not None
+                or return_lse
+                or lse is not None
+            ):
+                raise ValueError(
+                    "FP8-K/NVFP4-V decode does not yet support sliding-window, "
+                    "separate page indices, sparse/skip-softmax, sinks, or LSE features"
+                )
 
         bmm1_scale = _get_trtllm_gen_bmm1_scale_arg(
             bmm1_scale, bmm1_scale_log2, query.device

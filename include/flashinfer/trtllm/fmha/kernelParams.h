@@ -79,6 +79,9 @@ struct KernelParams {
   int64_t const* ptrCustomMaskOffsets;
   // The debug output matrix O
   float* ptrDebugO;
+  // DSv4 inverse-RoPE metadata and output scale tensor. Unused by FlashInfer FMHA.
+  float const* ptrDsv4InvRopeCosSinCache;
+  float* ptrDsv4OScale;
   // The first sparseMask offsets in the Kv sequence dimension.
   int32_t const* ptrFirstSparseMaskOffsetsKv;
   // The counter for the multiCtasKv mode.
@@ -130,6 +133,8 @@ struct KernelParams {
   int32_t mBatchSize;
   // The chunked attention size in log2.
   int32_t mChunkedAttentionSizeLog2;
+  // Padded token dimension for the DSv4 fused scale layout. Unused by FlashInfer FMHA.
+  int64_t mDsv4ScaleBufM;
   // The factor to add to the maximum value to increase the probability
   //   of skip correction during next iterations.
   float mInflateMax;
@@ -191,8 +196,7 @@ struct KernelParams {
   // true -> vLLM/FlashInfer; false -> TRT-LLM.
   bool mUsesSharedPagedKvIdx{true};
 
-  // Runtime skip-correction threshold added to TRTLLM-gen's ABI in d89eb43c.
-  // FlashInfer does not enable threshold-based freezing, so keep it disabled.
+  // FlashInfer does not enable runtime skip correction.
   float mSkipCorrThreshold{0.f};
 
   // Create the TMA shape/stride for Q.
