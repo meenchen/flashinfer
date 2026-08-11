@@ -200,8 +200,7 @@ struct KernelParams {
   // true -> vLLM/FlashInfer; false -> TRT-LLM.
   bool mUsesSharedPagedKvIdx{true};
 
-  // Runtime skip-correction threshold added to TRTLLM-gen's ABI in d89eb43c.
-  // FlashInfer does not enable threshold-based freezing, so keep it disabled.
+  // FlashInfer does not enable runtime skip correction.
   float mSkipCorrThreshold{0.f};
 
   // Create the TMA shape/stride for Q.
