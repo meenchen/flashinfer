@@ -2190,3 +2190,34 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
             kv_cache_sf=(None, value_block_scales),
             q_len_per_req=2,
         )
+
+
+@pytest.mark.parametrize(
+    "kv_dtype,o_dtype",
+    [("fp8", "bf16"), ("nvfp4", "fp8")],
+)
+def test_trtllm_batch_decode_coherent_quantized_artifact(
+    kv_dtype: str, o_dtype: str
+) -> None:
+    """Keep homogeneous kernels compatible with the mixed-KV artifact ABI."""
+    _skip_if_not_blackwell()
+    _test_trtllm_batch_decode(
+        "trtllm-gen",
+        "HND",
+        batch_size=2,
+        q_len_per_req=1,
+        page_size=64,
+        num_kv_heads=4,
+        head_grp_size=4,
+        window_left=-1,
+        q_dtype="fp8",
+        o_dtype=o_dtype,
+        kv_dtype=kv_dtype,
+        enable_pdl=None,
+        enable_sink=False,
+        max_in_kv_len=512,
+        head_dim=128,
+        device_scale=True,
+        skips_softmax=False,
+        uses_shared_paged_kv_idx=True,
+    )
