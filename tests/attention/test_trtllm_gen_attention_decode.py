@@ -1761,7 +1761,9 @@ def test_trtllm_batch_decode_spec(
 
 
 @pytest.mark.parametrize(
-    "pages_per_seq", [2, 8, 128], ids=["one_cta_gmem", "cga", "multi_cta_gmem"]
+    "pages_per_seq",
+    [2, 8, 128],
+    ids=["one_cta_persistent", "cga", "multi_cta_gmem"],
 )
 def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
     _skip_if_not_blackwell()
