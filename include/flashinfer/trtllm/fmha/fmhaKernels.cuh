@@ -37,6 +37,12 @@
 #include "kernelParams.h"
 #include "lse.cuh"
 
+#ifndef TLLM_GEN_FMHA_KERNEL_PARAMS_ABI_VERSION
+#error "TRTLLM-gen FMHA artifact does not declare its KernelParams ABI"
+#endif
+static_assert(TLLM_GEN_FMHA_KERNEL_PARAMS_ABI_VERSION == 2,
+              "FlashInfer and TRTLLM-gen FMHA KernelParams ABIs do not match");
+
 #ifdef TLLM_GEN_FMHA_CUBIN_PATH
 static const std::string tllm_gen_fmha_cubin_path = std::string(TLLM_GEN_FMHA_CUBIN_PATH);
 #else
