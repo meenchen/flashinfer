@@ -1765,7 +1765,10 @@ def test_trtllm_batch_decode_spec(
     [2, 8, 128],
     ids=["one_cta_persistent", "cga", "multi_cta_gmem"],
 )
-def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_trtllm_batch_decode_fp8_k_nvfp4_v(
+    pages_per_seq: int, head_dim: int
+) -> None:
     _skip_if_not_blackwell()
     torch.manual_seed(0)
 
@@ -1774,7 +1777,6 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(pages_per_seq: int) -> None:
     num_kv_heads = 4
     head_group_size = 4
     num_qo_heads = num_kv_heads * head_group_size
-    head_dim = 128
     num_pages = batch_size * pages_per_seq
 
     query = torch.randn(
