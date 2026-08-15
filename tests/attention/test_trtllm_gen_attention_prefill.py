@@ -775,7 +775,8 @@ def test_trtllm_batch_prefill_lse_contract(return_lse, provide_lse):
 
 
 @pytest.mark.parametrize("max_q_len,max_kv_len", [(127, 511), (511, 2047)])
-def test_trtllm_batch_prefill_fp8_k_nvfp4_v(max_q_len, max_kv_len):
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_trtllm_batch_prefill_fp8_k_nvfp4_v(max_q_len, max_kv_len, head_dim):
     _skip_if_not_blackwell()
     _test_trtllm_batch_prefill(
         "HND",
@@ -793,7 +794,7 @@ def test_trtllm_batch_prefill_fp8_k_nvfp4_v(max_q_len, max_kv_len):
         max_q_len=max_q_len,
         max_kv_len=max_kv_len,
         device_scale=True,
-        head_dim=128,
+        head_dim=head_dim,
         uses_shared_paged_kv_idx=True,
     )
 
