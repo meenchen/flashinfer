@@ -3452,12 +3452,16 @@ def trtllm_batch_decode_with_kv_cache(
                 raise ValueError("FP8-K/NVFP4-V decode requires BF16 output")
             if kv_layout != "HND":
                 raise ValueError("FP8-K/NVFP4-V decode currently requires HND layout")
+            head_dim = query.shape[-1]
             if (
-                query.shape[-1] != 128
-                or k_cache.shape[-1] != 128
-                or v_cache.shape[-1] * 2 != 128
+                head_dim not in (128, 256)
+                or k_cache.shape[-1] != head_dim
+                or v_cache.shape[-1] * 2 != head_dim
             ):
-                raise ValueError("FP8-K/NVFP4-V decode requires head dimension 128")
+                raise ValueError(
+                    "FP8-K/NVFP4-V decode requires matching head dimensions "
+                    "of 128 or 256"
+                )
             if k_cache.shape[-2] != 64:
                 raise ValueError("FP8-K/NVFP4-V decode requires page size 64")
             if q_len_per_req != 1:

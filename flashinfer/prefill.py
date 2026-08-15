@@ -4999,14 +4999,16 @@ def trtllm_batch_context_with_kv_cache(
             raise ValueError("FP8-K/NVFP4-V context requires FP8 query and BF16 output")
         if kv_layout != "HND":
             raise ValueError("FP8-K/NVFP4-V context currently requires HND layout")
+        head_dim = query.shape[-1]
         if (
-            query.shape[-1] != 128
-            or k_cache.shape[-1] != 128
-            or v_cache.shape[-1] * 2 != 128
+            head_dim not in (128, 256)
+            or k_cache.shape[-1] != head_dim
+            or v_cache.shape[-1] * 2 != head_dim
             or k_cache.shape[-2] != 64
         ):
             raise ValueError(
-                "FP8-K/NVFP4-V context requires head dimension 128 and page size 64"
+                "FP8-K/NVFP4-V context requires matching head dimensions "
+                "of 128 or 256 and page size 64"
             )
         if (
             not causal
