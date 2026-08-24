@@ -3446,8 +3446,8 @@ def trtllm_batch_decode_with_kv_cache(
             raise ValueError(f"Invalid out_dtype: {out_dtype}")
 
         if is_fp8_k_nvfp4_v:
-            if query.dtype not in (torch.float8_e4m3fn, torch.bfloat16):
-                raise ValueError("FP8-K/NVFP4-V decode requires FP8 or BF16 query")
+            if query.dtype != torch.float8_e4m3fn:
+                raise ValueError("FP8-K/NVFP4-V decode requires FP8 query")
             if out_dtype != torch.bfloat16:
                 raise ValueError("FP8-K/NVFP4-V decode requires BF16 output")
             if kv_layout != "HND":

@@ -1766,11 +1766,10 @@ def test_trtllm_batch_decode_spec(
     ids=["one_cta_persistent", "cga", "multi_cta_gmem"],
 )
 @pytest.mark.parametrize("head_dim", [128, 256])
-@pytest.mark.parametrize("q_dtype", ["fp8", "bf16"])
 def test_trtllm_batch_decode_fp8_k_nvfp4_v(
-    pages_per_seq: int, head_dim: int, q_dtype: str
+    pages_per_seq: int, head_dim: int
 ) -> None:
-    """Resolve and launch every mixed-KV query transform from exported metadata."""
+    """Resolve and launch every mixed-KV FP8-query path from exported metadata."""
     _skip_if_not_blackwell()
     torch.manual_seed(0)
 
@@ -1799,14 +1798,9 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(
     value = torch.randn_like(key)
 
     query_fp8, fp8_query_scale = to_float8(query)
-    if q_dtype == "fp8":
-        query_input = query_fp8
-        query_scale = float(fp8_query_scale.item())
-        query_ref = query_fp8.bfloat16() * query_scale
-    else:
-        query_input = query
-        query_scale = 1.0
-        query_ref = query
+    query_input = query_fp8
+    query_scale = float(fp8_query_scale.item())
+    query_ref = query_fp8.bfloat16() * query_scale
     key_fp8, key_scale = to_float8(key)
     (_, value_fp4), (_, value_block_scales), _, value_scale = (
         nvfp4_quantize_paged_kv_cache(value, value, kv_layout="HND")
