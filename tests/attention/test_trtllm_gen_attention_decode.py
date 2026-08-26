@@ -2080,7 +2080,9 @@ def test_trtllm_batch_decode_spec(
     ids=["one_cta_persistent", "cga", "multi_cta_gmem"],
 )
 @pytest.mark.parametrize("head_dim", [128, 256])
-@pytest.mark.parametrize("head_group_size", [4, 16], ids=["q8", "q16"])
+@pytest.mark.parametrize(
+    "head_group_size", [4, 16, 64], ids=["q8", "q16", "q16_ratio64"]
+)
 def test_trtllm_batch_decode_fp8_k_nvfp4_v(
     pages_per_seq: int, head_dim: int, head_group_size: int
 ) -> None:
