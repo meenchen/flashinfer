@@ -40,6 +40,28 @@ using FastModDivInt32 = cuda::fast_mod_div<int32_t>;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 using Dtype = Data_type;
 
+template <typename KernelMeta>
+auto enablesBf16QFp8KvKOnlyTransform(KernelMeta const& kernelMeta, int)
+    -> decltype(kernelMeta.mEnablesBf16QFp8KvKOnlyTransform) {
+  return kernelMeta.mEnablesBf16QFp8KvKOnlyTransform;
+}
+
+template <typename KernelMeta>
+bool enablesBf16QFp8KvKOnlyTransform(KernelMeta const&, long) {
+  return false;
+}
+
+template <typename KernelMeta>
+auto usesSeparateTransformedKv(KernelMeta const& kernelMeta, int)
+    -> decltype(kernelMeta.mSeparateTransformedKv) {
+  return kernelMeta.mSeparateTransformedKv;
+}
+
+template <typename KernelMeta>
+bool usesSeparateTransformedKv(KernelMeta const&, long) {
+  return false;
+}
+
 struct KernelParams {
   // TMA descriptor for Q.
   CUtensorMap tmaQ_;
@@ -711,12 +733,12 @@ struct KernelParams {
         kernelMeta.mDataTypeV == DATA_TYPE_E2M1) {
       dtypeBmm2 = DATA_TYPE_E4M3;
     }
-    if (kernelMeta.mEnablesBf16QFp8KvKOnlyTransform) {
+    if (enablesBf16QFp8KvKOnlyTransform(kernelMeta, 0)) {
       dtypeBmm2 = kernelMeta.mDataTypeV;
     }
     bool const transformsK{
         kernelMeta.mDataTypeK != kernelMeta.mDataTypeQ ||
-        (kernelMeta.mSeparateTransformedKv && kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
+        (usesSeparateTransformedKv(kernelMeta, 0) && kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
          kernelMeta.mDataTypeK == DATA_TYPE_E4M3 && kernelMeta.mDataTypeV == DATA_TYPE_E2M1)};
     bool const transformsV{kernelMeta.mDataTypeV != dtypeBmm2};
     // Whether store transformed K/V in TMEM.
