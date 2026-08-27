@@ -542,8 +542,12 @@ void trtllm_paged_attention_context(
   auto k_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   auto v_data_type = dl_dtype_to_tllm_data_type(value_cache.dtype());
   auto o_data_type = dl_dtype_to_tllm_data_type(out.dtype());
+  // FlashInfer/vLLM uses one page index for K and V by default. TRT-LLM's
+  // separate layout permits independently sized K/V pools and page tables.
+  bool const uses_shared_paged_kv_idx_value = uses_shared_paged_kv_idx.value_or(true);
   TVM_FFI_ICHECK_EQ(key_cache.ndim(), value_cache.ndim());
-  for (int i = 0; i < key_cache.ndim() - 1; i++) {
+  int const first_matching_dim = uses_shared_paged_kv_idx_value ? 0 : 1;
+  for (int i = first_matching_dim; i < key_cache.ndim() - 1; i++) {
     TVM_FFI_ICHECK_EQ(key_cache.size(i), value_cache.size(i));
   }
   int num_qo_heads = query.size(1);
@@ -561,15 +565,13 @@ void trtllm_paged_attention_context(
       << std::to_string(head_dim_o);
   int max_num_blocks_per_seq = block_tables.size(-1);
   bool is_shared_kv = key_cache.data_ptr() == value_cache.data_ptr();
-  int num_pages_in_mem_pool = is_shared_kv ? key_cache.size(0) : key_cache.size(0) * 2;
+  int num_pages_in_mem_pool =
+      is_shared_kv ? key_cache.size(0)
+                   : std::max(key_cache.size(0), value_cache.size(0)) * 2;
   bool const is_fp4_k = is_4bit(k_data_type);
   bool const is_fp4_v = is_4bit(v_data_type);
   int const k_stride_idx_factor = is_fp4_k ? 2 : 1;
   int const v_stride_idx_factor = is_fp4_v ? 2 : 1;
-
-  // FlashInfer/vLLM layout -> true; TRT-LLM layout -> false.
-  // Default to flashinfer/vLLM layout.
-  bool const uses_shared_paged_kv_idx_value = uses_shared_paged_kv_idx.value_or(true);
 
   // Assume HND layout after Python-side transpose: [..., H, N, D]
   int page_size = key_cache.size(-2);
