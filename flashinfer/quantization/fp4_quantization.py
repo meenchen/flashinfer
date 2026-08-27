@@ -2035,6 +2035,7 @@ def get_nvfp4_kv_pages_to_fp8_module():
         output: torch.Tensor,
         kv_layout: int,
         sf_layout: int,
+        compact_output: bool,
     ) -> None:
         module.nvfp4_kv_dequantize_pages_to_fp8(
             paged_cache,
@@ -2044,6 +2045,7 @@ def get_nvfp4_kv_pages_to_fp8_module():
             output,
             kv_layout,
             sf_layout,
+            compact_output,
         )
 
     @register_fake_op("flashinfer::nvfp4_kv_dequantize_pages_to_fp8")
@@ -2055,6 +2057,7 @@ def get_nvfp4_kv_pages_to_fp8_module():
         output: torch.Tensor,
         kv_layout: int,
         sf_layout: int,
+        compact_output: bool,
     ) -> None:
         pass
 
@@ -2267,13 +2270,16 @@ def nvfp4_kv_dequantize_pages_to_fp8(
     output: torch.Tensor,
     kv_layout: str = "NHD",
     sf_layout: str = "linear",
+    compact_output: bool = False,
 ) -> None:
     r"""Dequantize selected NVFP4 cache pages into normalized FP8 pages.
 
-    The output uses the same physical page IDs as the input. This allows it to
-    be paired with another paged cache tensor and the original page table. The
-    per-tensor global scale is intentionally not applied: callers pass that
-    scale to FP8 attention as ``k_scale`` or ``v_scale``.
+    By default, the output uses the same physical page IDs as the input. With
+    ``compact_output=True``, page reference ``i`` is written to output page
+    ``i + 1``; page zero is reserved for invalid references. The compact mode
+    supports independently indexed K/V pools without allocating a full-size
+    FP8 shadow cache. The per-tensor global scale is intentionally not applied:
+    callers pass that scale to FP8 attention as ``k_scale`` or ``v_scale``.
 
     ``num_active_pages`` is a one-element CUDA int32 tensor. Keeping the active
     count on device makes the operation safe for CUDA graph replay without a
@@ -2297,6 +2303,10 @@ def nvfp4_kv_dequantize_pages_to_fp8(
     sf_layout : str
         ``"linear"`` or ``"swizzled_4x4"``. The latter matches the TRTLLM
         NVFP4 attention scale layout.
+    compact_output : bool
+        Write page reference ``i`` to output page ``i + 1`` instead of using
+        the source physical page ID. In this mode, ``output.shape[0]`` must be
+        ``page_indices.numel() + 1``.
     """
     _check_kv_layout(kv_layout)
     if sf_layout not in ("linear", "swizzled_4x4"):
@@ -2333,6 +2343,7 @@ def nvfp4_kv_dequantize_pages_to_fp8(
         output,
         layout_code,
         sf_layout_code,
+        compact_output,
     )
 
 
