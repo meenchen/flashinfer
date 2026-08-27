@@ -829,6 +829,86 @@ def test_trtllm_batch_prefill_coherent_quantized_artifact(
     )
 
 
+def test_trtllm_batch_prefill_separate_page_pool_sizes() -> None:
+    """Separate K/V page tables may address independently sized pools."""
+    _skip_if_not_blackwell()
+    torch.manual_seed(0)
+
+    page_size = 64
+    head_dim = 128
+    num_kv_heads = 2
+    num_qo_heads = 8
+    q_len = 64
+    kv_len = 128
+    fp8 = torch.float8_e4m3fn
+
+    query = torch.randn(
+        q_len, num_qo_heads, head_dim, device=GPU_DEVICE, dtype=torch.bfloat16
+    ).to(fp8)
+    key_cache = torch.randn(
+        2,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        device=GPU_DEVICE,
+        dtype=torch.bfloat16,
+    ).to(fp8)
+    value_cache = torch.randn(
+        3,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        device=GPU_DEVICE,
+        dtype=torch.bfloat16,
+    ).to(fp8)
+    block_tables = torch.tensor(
+        [[[0, 1], [1, 2]]], dtype=torch.int32, device=GPU_DEVICE
+    )
+    seq_lens = torch.tensor([kv_len], dtype=torch.int32, device=GPU_DEVICE)
+    cum_seq_lens_q = torch.tensor([0, q_len], dtype=torch.int32, device=GPU_DEVICE)
+    cum_seq_lens_kv = torch.tensor(
+        [0, kv_len], dtype=torch.int32, device=GPU_DEVICE
+    )
+    workspace_buffer, _ = create_workspace_buffers(GPU_DEVICE)
+
+    output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+        query,
+        (key_cache, value_cache),
+        workspace_buffer,
+        block_tables,
+        seq_lens,
+        q_len,
+        kv_len,
+        head_dim**-0.5,
+        1.0,
+        1,
+        cum_seq_lens_q,
+        cum_seq_lens_kv,
+        out_dtype=torch.bfloat16,
+        kv_layout="HND",
+        uses_shared_paged_kv_idx=False,
+    )
+
+    keys = key_cache.permute(1, 0, 2, 3).reshape(
+        num_kv_heads, kv_len, head_dim
+    )
+    values = value_cache[1:].permute(1, 0, 2, 3).reshape(
+        num_kv_heads, kv_len, head_dim
+    )
+    keys = keys.repeat_interleave(num_qo_heads // num_kv_heads, dim=0).float()
+    values = values.repeat_interleave(num_qo_heads // num_kv_heads, dim=0).float()
+    logits = torch.einsum("qhd,hnd->qhn", query.float(), keys) * head_dim**-0.5
+    prefix_len = kv_len - q_len
+    causal_mask = torch.arange(kv_len, device=GPU_DEVICE)[None, :] <= (
+        prefix_len + torch.arange(q_len, device=GPU_DEVICE)[:, None]
+    )
+    probs = torch.softmax(
+        logits.masked_fill(~causal_mask[:, None, :], float("-inf")), dim=-1
+    )
+    reference = torch.einsum("qhn,hnd->qhd", probs, values).to(torch.bfloat16)
+    torch.testing.assert_close(output, reference, rtol=0.05, atol=0.07)
+
+
 @pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
 @pytest.mark.parametrize(
     "batch_size,page_size,num_kv_heads,head_grp_size",
