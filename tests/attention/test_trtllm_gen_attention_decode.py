@@ -1866,6 +1866,23 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(
     )
     assert cosine.item() > 0.97
 
+    value_fp4.zero_()
+    zero_value_output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+        query_input,
+        (key_fp8, value_fp4),
+        workspace,
+        block_tables,
+        seq_lens,
+        int(seq_lens.max().item()),
+        bmm1_scale=query_scale * float(key_scale.item()) / math.sqrt(head_dim),
+        bmm2_scale=value_scale,
+        out_dtype=torch.bfloat16,
+        backend="trtllm-gen",
+        kv_layout="HND",
+        kv_cache_sf=(None, value_block_scales),
+    )
+    assert torch.count_nonzero(zero_value_output).item() == 0
+
     with pytest.raises(ValueError, match="q_len_per_req=1"):
         flashinfer.decode.trtllm_batch_decode_with_kv_cache(
             query_input,

@@ -744,8 +744,13 @@ struct KernelParams {
     // Whether store transformed K/V in TMEM.
     bool const isSwapsMmaAb =
         isSwapsMmaAbForGenerationKernel(static_cast<FmhaKernelType>(kernelMeta.mKernelType));
-    bool const storeTransformedKvInTmem{kernelMeta.mDataTypeKv == DATA_TYPE_E2M1 &&
-                                        kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
+    bool const isFp8QFp8KNvFp4V{kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
+                                kernelMeta.mDataTypeK == DATA_TYPE_E4M3 &&
+                                kernelMeta.mDataTypeV == DATA_TYPE_E2M1};
+    // Mixed K/V has no single mDataTypeKv, but uses the same unpacked V TMA path.
+    bool const storeTransformedKvInTmem{kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
+                                        (kernelMeta.mDataTypeKv == DATA_TYPE_E2M1 ||
+                                         isFp8QFp8KNvFp4V) &&
                                         maxHeadDimKv >= 128 && isSwapsMmaAb};
     // Whether swizzle is needed for K/V.
     bool const swizzleK{storeTransformedKvInTmem || !transformsK};
