@@ -981,6 +981,14 @@ class TllmGenFmhaKernel {
     // Normalize this before heuristic probing; some GQA-generation heuristics load candidate
     // kernels while selecting tileSizeQ.
     selectNumTokensPerPage(params, selectKernelParams);
+    // Mixed context kernels at H128/H256 use a 64-token KV tile. This leaves enough TMEM for
+    // converted NVFP4 V while preserving the context kernel's output and softmax allocations.
+    if (isContextKernel(params.mKernelType) && mDtypeQ == DATA_TYPE_E4M3 &&
+        mDtypeK == DATA_TYPE_E4M3 && mDtypeV == DATA_TYPE_E2M1 &&
+        (params.mHeadDimQk == 128 || params.mHeadDimQk == 256) &&
+        params.mHeadDimQk == params.mHeadDimV) {
+      selectKernelParams.mTileSizeKv = 64;
+    }
     bool const isMlaGeneration = isGenerationKernel(params.mKernelType) && isMlaGenKernel(params);
 
     // Select the kernel based on the kernel type.
