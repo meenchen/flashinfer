@@ -113,9 +113,14 @@ FLASHINFER_CUBIN_DIR: pathlib.Path = _get_cubin_dir()
 def _get_aot_dir():
     """
     Get the AOT directory path with the following priority:
-    1. flashinfer-jit-cache package if installed
-    2. Default fallback to _package_root / "data" / "aot"
+    1. Environment variable FLASHINFER_AOT_DIR
+    2. flashinfer-jit-cache package if installed
+    3. Default fallback to _package_root / "data" / "aot"
     """
+    env_dir = os.getenv("FLASHINFER_AOT_DIR")
+    if env_dir:
+        return pathlib.Path(env_dir)
+
     # First check if flashinfer-jit-cache package is installed
     if has_flashinfer_jit_cache():
         import flashinfer_jit_cache
