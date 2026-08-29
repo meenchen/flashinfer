@@ -243,8 +243,9 @@ __global__ void nvfp4_pages_to_fp8_kernel(
     const uint8_t* __restrict__ paged_cache, const uint8_t* __restrict__ paged_scales,
     const IdType* __restrict__ page_indices, const int32_t* __restrict__ num_active_pages,
     uint8_t* __restrict__ output, IdType* __restrict__ output_page_indices,
-    const int num_pages_per_seq, const int max_page_indices, const int num_pages,
-    const int page_size, const int num_heads, const int head_dim,
+    const int num_pages_per_seq, const int64_t page_indices_stride,
+    const int max_page_indices, const int num_pages, const int page_size,
+    const int num_heads, const int head_dim,
     const int64_t cache_stride_page, const int64_t cache_stride_n,
     const int64_t cache_stride_h, const int64_t scale_stride_page,
     const int64_t scale_stride_n, const int64_t scale_stride_h,
@@ -264,11 +265,12 @@ __global__ void nvfp4_pages_to_fp8_kernel(
        page_head_pos += gridDim.x) {
     const int page_pos = page_head_pos / num_heads;
     const int head = page_head_pos % num_heads;
-    const IdType page = page_indices[page_pos];
+    const int batch = page_pos / num_pages_per_seq;
+    const int page_in_seq = page_pos - batch * num_pages_per_seq;
+    const IdType page = page_indices[static_cast<int64_t>(batch) * page_indices_stride +
+                                     page_in_seq];
     const bool valid_page = page >= 0 && page < num_pages;
     if (output_page_indices != nullptr && head == 0 && threadIdx.x == 0) {
-      const int batch = page_pos / num_pages_per_seq;
-      const int page_in_seq = page_pos - batch * num_pages_per_seq;
       const int table_offset = batch * 2 * num_pages_per_seq + page_in_seq;
       output_page_indices[table_offset] = valid_page ? page : static_cast<IdType>(-1);
       output_page_indices[table_offset + num_pages_per_seq] =
@@ -554,7 +556,10 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
   TVM_FFI_ICHECK(paged_cache.ndim() == 4) << "paged_cache must be 4D";
   TVM_FFI_ICHECK(paged_scales.ndim() == 4) << "paged_scales must be 4D";
   TVM_FFI_ICHECK(output.ndim() == 4) << "output must be 4D";
-  TVM_FFI_ICHECK(page_indices.ndim() == 1) << "page_indices must be 1D";
+  TVM_FFI_ICHECK(page_indices.ndim() == 1 || page_indices.ndim() == 2)
+      << "page_indices must be 1D or 2D";
+  TVM_FFI_ICHECK(page_indices.strides()[page_indices.ndim() - 1] == 1)
+      << "page_indices last dimension must be contiguous";
   if (num_active_pages.has_value()) {
     TensorView active_pages = num_active_pages.value();
     CHECK_INPUT(active_pages);
@@ -599,7 +604,10 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
       << "scale dimension 2 mismatch";
   TVM_FFI_ICHECK(paged_scales.size(3) == scale_dim) << "scale head_dim mismatch";
 
-  int num_pages_per_seq = 0;
+  int num_pages_per_seq =
+      page_indices.ndim() == 1 ? page_indices.numel() : page_indices.size(1);
+  int64_t page_indices_stride =
+      page_indices.ndim() == 1 ? page_indices.numel() : page_indices.strides()[0];
   if (output_page_indices.has_value()) {
     TensorView table = output_page_indices.value();
     CHECK_INPUT(table);
@@ -609,10 +617,18 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
         << "output_page_indices must have shape [batch_size, 2, pages_per_seq]";
     TVM_FFI_ICHECK(table.size(0) * table.size(2) == page_indices.numel())
         << "output_page_indices shape must cover every page reference";
+    if (page_indices.ndim() == 2) {
+      TVM_FFI_ICHECK(table.size(0) == page_indices.size(0))
+          << "output_page_indices batch size mismatch";
+      TVM_FFI_ICHECK(table.size(2) == num_pages_per_seq)
+          << "output_page_indices pages_per_seq mismatch";
+    } else {
+      num_pages_per_seq = table.size(2);
+      page_indices_stride = num_pages_per_seq;
+    }
     TVM_FFI_ICHECK(table.dtype() == page_indices.dtype())
         << "output_page_indices and page_indices must have the same dtype";
     CHECK_DEVICE(paged_cache, table);
-    num_pages_per_seq = table.size(2);
   }
 
   CHECK_DEVICE(paged_cache, paged_scales);
@@ -649,7 +665,8 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
             ? static_cast<const int32_t*>(num_active_pages.value().data_ptr())
             : nullptr,
         static_cast<uint8_t*>(output.data_ptr()), table_ptr, num_pages_per_seq,
-        page_indices.numel(), num_pages, page_size, num_heads, head_dim,
+        page_indices_stride, page_indices.numel(), num_pages, page_size,
+        num_heads, head_dim,
         cache_strides[0], cache_stride_n,
         cache_stride_h, scale_strides[0], scale_stride_n, scale_stride_h,
         output_strides[0], output_stride_n, output_stride_h, sf_layout == 1, compact_output);

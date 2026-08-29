@@ -2297,7 +2297,9 @@ def nvfp4_kv_dequantize_pages_to_fp8(
     paged_scales : torch.Tensor
         FP8 E4M3 block scales with a final dimension of ``head_dim // 16``.
     page_indices : torch.Tensor
-        CUDA int32 or int64 buffer containing physical page IDs.
+        CUDA int32 or int64 tensor containing physical page IDs. It may be a
+        flat vector or a two-dimensional block table whose last dimension is
+        contiguous; padded row strides are supported without copying.
     num_active_pages : Optional[torch.Tensor]
         One-element CUDA int32 tensor specifying how many page IDs are active,
         or ``None`` to process every page reference.
@@ -2336,6 +2338,10 @@ def nvfp4_kv_dequantize_pages_to_fp8(
         raise ValueError(
             f"page_indices must have dtype torch.int32 or torch.int64, got {page_indices.dtype}"
         )
+    if page_indices.ndim not in (1, 2) or page_indices.stride(-1) != 1:
+        raise ValueError(
+            "page_indices must be 1D or 2D with a contiguous last dimension"
+        )
     if num_active_pages is not None and (
         num_active_pages.dtype != torch.int32 or num_active_pages.numel() != 1
     ):
@@ -2351,6 +2357,12 @@ def nvfp4_kv_dequantize_pages_to_fp8(
             and output_page_indices.shape[0] * output_page_indices.shape[2]
             == page_indices.numel()
         )
+        if page_indices.ndim == 2:
+            expected_shape = expected_shape and output_page_indices.shape == (
+                page_indices.shape[0],
+                2,
+                page_indices.shape[1],
+            )
         if not compact_output or not expected_shape:
             raise ValueError(
                 "output_page_indices requires compact_output=True and shape "
