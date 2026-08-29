@@ -34,6 +34,57 @@ __device__ __constant__ float E2M1_LUT[16] = {0.0f,  0.5f,  1.0f,  1.5f,  2.0f, 
                                               4.0f,  6.0f,  -0.0f, -0.5f, -1.0f, -1.5f,
                                               -2.0f, -3.0f, -4.0f, -6.0f};
 
+__device__ __forceinline__ uint4 dequant_nvfp4x16_to_fp8(uint64_t packed_fp4,
+                                                          uint8_t scale_fp8) {
+  uint4 output;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  const uint16_t scale_fp8x2 = static_cast<uint16_t>(scale_fp8) * 0x101u;
+  uint32_t scale_fp16x2;
+  asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;"
+               : "=r"(scale_fp16x2)
+               : "h"(scale_fp8x2));
+
+  const uint32_t* packed_words = reinterpret_cast<const uint32_t*>(&packed_fp4);
+  uint32_t* output_words = reinterpret_cast<uint32_t*>(&output);
+#pragma unroll
+  for (int word = 0; word < 2; ++word) {
+    asm volatile("{\n"
+                 ".reg .b8 b0, b1, b2, b3;\n"
+                 ".reg .b32 h0, h1, h2, h3;\n"
+                 ".reg .b16 e0, e1, e2, e3;\n"
+                 "mov.b32 {b0, b1, b2, b3}, %2;\n"
+                 "cvt.rn.f16x2.e2m1x2 h0, b0;\n"
+                 "cvt.rn.f16x2.e2m1x2 h1, b1;\n"
+                 "cvt.rn.f16x2.e2m1x2 h2, b2;\n"
+                 "cvt.rn.f16x2.e2m1x2 h3, b3;\n"
+                 "mul.rn.f16x2 h0, h0, %3;\n"
+                 "mul.rn.f16x2 h1, h1, %3;\n"
+                 "mul.rn.f16x2 h2, h2, %3;\n"
+                 "mul.rn.f16x2 h3, h3, %3;\n"
+                 "cvt.rn.satfinite.e4m3x2.f16x2 e0, h0;\n"
+                 "cvt.rn.satfinite.e4m3x2.f16x2 e1, h1;\n"
+                 "cvt.rn.satfinite.e4m3x2.f16x2 e2, h2;\n"
+                 "cvt.rn.satfinite.e4m3x2.f16x2 e3, h3;\n"
+                 "mov.b32 %0, {e0, e1};\n"
+                 "mov.b32 %1, {e2, e3};\n"
+                 "}\n"
+                 : "=r"(output_words[word * 2]), "=r"(output_words[word * 2 + 1])
+                 : "r"(packed_words[word]), "r"(scale_fp16x2));
+  }
+#else
+  uint8_t* output_bytes = reinterpret_cast<uint8_t*>(&output);
+  const float scale =
+      static_cast<float>(*reinterpret_cast<const __nv_fp8_e4m3*>(&scale_fp8));
+#pragma unroll
+  for (int index = 0; index < NVFP4_BLOCK_SIZE; ++index) {
+    const uint8_t fp4 = (packed_fp4 >> (index * 4)) & 0xF;
+    output_bytes[index] =
+        __nv_cvt_float_to_fp8(E2M1_LUT[fp4] * scale, __NV_SATFINITE, __NV_E4M3);
+  }
+#endif
+  return output;
+}
+
 // Dequantize 4 FP4 values (packed in uint16_t) to float2x2
 __device__ __forceinline__ void dequant_fp4x4_to_float2x2(uint16_t packed_fp4, float scale_0,
                                                           float scale_1, float global_scale,
@@ -198,26 +249,24 @@ __global__ void nvfp4_pages_to_fp8_kernel(
     const int64_t output_stride_h, const bool swizzled_scales,
     const bool compact_output) {
   const int scale_dim = head_dim / NVFP4_BLOCK_SIZE;
-  const int scale_groups_per_page = page_size * num_heads * scale_dim;
+  const int scale_groups_per_page_head = page_size * scale_dim;
   const int active_pages = min(*num_active_pages, max_page_indices);
   constexpr int PACKED_PER_SCALE = NVFP4_BLOCK_SIZE / 2;
-  const int packed_in_scale = threadIdx.x % PACKED_PER_SCALE;
-  const int scale_group_in_block = threadIdx.x / PACKED_PER_SCALE;
-  const int scale_groups_per_block = blockDim.x / PACKED_PER_SCALE;
 
   // A fixed launch grid keeps this operation CUDA-graph replayable while the
   // device-side active page count grows during decoding.
-  for (int page_pos = blockIdx.x; page_pos < active_pages; page_pos += gridDim.x) {
+  for (int page_head_pos = blockIdx.x; page_head_pos < active_pages * num_heads;
+       page_head_pos += gridDim.x) {
+    const int page_pos = page_head_pos / num_heads;
+    const int head = page_head_pos % num_heads;
     const IdType page = page_indices[page_pos];
     if (page < 0 || page >= num_pages) continue;
 
     const int output_page = compact_output ? page_pos + 1 : page;
-    for (int linear = scale_group_in_block; linear < scale_groups_per_page;
-         linear += scale_groups_per_block) {
+    for (int linear = threadIdx.x; linear < scale_groups_per_page_head;
+         linear += blockDim.x) {
       const int scale_idx = linear % scale_dim;
-      const int token_head = linear / scale_dim;
-      const int head = token_head % num_heads;
-      const int token = token_head / num_heads;
+      const int token = linear / scale_dim;
 
       int scale_token = token;
       int scale_col = scale_idx;
@@ -229,30 +278,20 @@ __global__ void nvfp4_pages_to_fp8_kernel(
       const int64_t scale_offset = static_cast<int64_t>(page) * scale_stride_page +
                                    static_cast<int64_t>(scale_token) * scale_stride_n +
                                    static_cast<int64_t>(head) * scale_stride_h + scale_col;
-      float scale = 0.0f;
-      if (packed_in_scale == 0) {
-        const uint8_t scale_fp8 = paged_scales[scale_offset];
-        scale = static_cast<float>(*reinterpret_cast<const __nv_fp8_e4m3*>(&scale_fp8));
-      }
-      const int source_lane = (threadIdx.x % warpSize) - packed_in_scale;
-      scale = __shfl_sync(__activemask(), scale, source_lane);
+      const uint8_t scale_fp8 = paged_scales[scale_offset];
 
-      const int packed_col = scale_idx * PACKED_PER_SCALE + packed_in_scale;
+      const int packed_col = scale_idx * PACKED_PER_SCALE;
       const int64_t cache_offset = static_cast<int64_t>(page) * cache_stride_page +
                                    static_cast<int64_t>(token) * cache_stride_n +
                                    static_cast<int64_t>(head) * cache_stride_h + packed_col;
-      const uint8_t packed_fp4 = paged_cache[cache_offset];
-      const uint8_t out0 = __nv_cvt_float_to_fp8(
-          E2M1_LUT[packed_fp4 & 0xF] * scale, __NV_SATFINITE, __NV_E4M3);
-      const uint8_t out1 = __nv_cvt_float_to_fp8(
-          E2M1_LUT[(packed_fp4 >> 4) & 0xF] * scale, __NV_SATFINITE, __NV_E4M3);
+      const uint64_t packed_fp4 = *reinterpret_cast<const uint64_t*>(paged_cache + cache_offset);
+      const uint4 dequantized = dequant_nvfp4x16_to_fp8(packed_fp4, scale_fp8);
       const int col = packed_col * 2;
       const int64_t output_offset =
           static_cast<int64_t>(output_page) * output_stride_page +
           static_cast<int64_t>(token) * output_stride_n +
           static_cast<int64_t>(head) * output_stride_h + col;
-      *reinterpret_cast<uint16_t*>(output + output_offset) =
-          static_cast<uint16_t>(out0) | (static_cast<uint16_t>(out1) << 8);
+      *reinterpret_cast<uint4*>(output + output_offset) = dequantized;
     }
   }
 }
@@ -557,11 +596,14 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
 
   ffi::CUDADeviceGuard device_guard(paged_cache.device().device_id);
   cudaStream_t stream = get_stream(paged_cache.device());
-  constexpr int NUM_BLOCKS = 256;
-  constexpr int NUM_THREADS = 256;
+  constexpr int MAX_BLOCKS = 1024;
+  constexpr int NUM_THREADS = 128;
+  const int64_t num_page_heads = page_indices.numel() * num_heads;
+  if (num_page_heads == 0) return;
+  const int num_blocks = num_page_heads < MAX_BLOCKS ? num_page_heads : MAX_BLOCKS;
 
   DISPATCH_DLPACK_IDTYPE_TO_CTYPE(page_indices.dtype(), id_type, [&] {
-    nvfp4_pages_to_fp8_kernel<id_type><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
+    nvfp4_pages_to_fp8_kernel<id_type><<<num_blocks, NUM_THREADS, 0, stream>>>(
         static_cast<const uint8_t*>(paged_cache.data_ptr()),
         static_cast<const uint8_t*>(paged_scales.data_ptr()),
         static_cast<const id_type*>(page_indices.data_ptr()),
