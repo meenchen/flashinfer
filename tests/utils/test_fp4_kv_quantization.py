@@ -482,6 +482,66 @@ def test_nvfp4_kv_dequantize_pages_to_compact_fp8_with_page_tables():
         )
 
 
+def test_nvfp4_kv_dequantize_pages_to_fp8_noncontiguous_page_table():
+    cc = get_compute_capability()
+    if cc < 80:
+        pytest.skip(f"SM{cc} does not support FP8 E4M3 (requires SM80+)")
+
+    num_pages, page_size, num_kv_heads, head_dim = 8, 16, 1, 128
+    packed = torch.full(
+        (num_pages, num_kv_heads, page_size, head_dim // 2),
+        0x11,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    scales = torch.ones(
+        (num_pages, num_kv_heads, page_size, head_dim // 16),
+        dtype=torch.float8_e4m3fn,
+        device="cuda",
+    )
+    padded_table = torch.tensor(
+        [[4, 1, -1, -1], [5, 2, -1, -1]], dtype=torch.int32, device="cuda"
+    )
+    page_indices = padded_table[:, :2]
+    assert not page_indices.is_contiguous()
+    output = torch.full(
+        (page_indices.numel() + 1, num_kv_heads, page_size, head_dim),
+        7.0,
+        dtype=torch.float8_e4m3fn,
+        device="cuda",
+    )
+    output_page_indices = torch.full(
+        (2, 2, 2), -7, dtype=torch.int32, device="cuda"
+    )
+
+    flashinfer.nvfp4_kv_dequantize_pages_to_fp8(
+        packed,
+        scales,
+        page_indices,
+        None,
+        output,
+        kv_layout="HND",
+        compact_output=True,
+        output_page_indices=output_page_indices,
+    )
+
+    torch.testing.assert_close(
+        output_page_indices,
+        torch.tensor(
+            [[[4, 1], [1, 2]], [[5, 2], [3, 4]]],
+            dtype=torch.int32,
+            device="cuda",
+        ),
+    )
+    for output_page in range(1, 5):
+        torch.testing.assert_close(
+            output[output_page].float(),
+            torch.full_like(output[output_page].float(), 0.5),
+            atol=0,
+            rtol=0,
+        )
+
+
 def test_nvfp4_kv_dequantize_pages_to_fp8_cuda_graph_dynamic_count():
     cc = get_compute_capability()
     if cc < 80:
