@@ -2025,17 +2025,18 @@ def get_nvfp4_kv_pages_to_fp8_module():
 
     @register_custom_op(
         "flashinfer::nvfp4_kv_dequantize_pages_to_fp8",
-        mutates_args=("output",),
+        mutates_args=("output", "output_page_indices"),
     )
     def nvfp4_kv_dequantize_pages_to_fp8(
         paged_cache: torch.Tensor,
         paged_scales: torch.Tensor,
         page_indices: torch.Tensor,
-        num_active_pages: torch.Tensor,
+        num_active_pages: Optional[torch.Tensor],
         output: torch.Tensor,
         kv_layout: int,
         sf_layout: int,
         compact_output: bool,
+        output_page_indices: Optional[torch.Tensor],
     ) -> None:
         module.nvfp4_kv_dequantize_pages_to_fp8(
             paged_cache,
@@ -2046,6 +2047,7 @@ def get_nvfp4_kv_pages_to_fp8_module():
             kv_layout,
             sf_layout,
             compact_output,
+            output_page_indices,
         )
 
     @register_fake_op("flashinfer::nvfp4_kv_dequantize_pages_to_fp8")
@@ -2053,11 +2055,12 @@ def get_nvfp4_kv_pages_to_fp8_module():
         paged_cache: torch.Tensor,
         paged_scales: torch.Tensor,
         page_indices: torch.Tensor,
-        num_active_pages: torch.Tensor,
+        num_active_pages: Optional[torch.Tensor],
         output: torch.Tensor,
         kv_layout: int,
         sf_layout: int,
         compact_output: bool,
+        output_page_indices: Optional[torch.Tensor],
     ) -> None:
         pass
 
@@ -2266,11 +2269,12 @@ def nvfp4_kv_dequantize_pages_to_fp8(
     paged_cache: torch.Tensor,
     paged_scales: torch.Tensor,
     page_indices: torch.Tensor,
-    num_active_pages: torch.Tensor,
+    num_active_pages: Optional[torch.Tensor],
     output: torch.Tensor,
     kv_layout: str = "NHD",
     sf_layout: str = "linear",
     compact_output: bool = False,
+    output_page_indices: Optional[torch.Tensor] = None,
 ) -> None:
     r"""Dequantize selected NVFP4 cache pages into normalized FP8 pages.
 
@@ -2281,9 +2285,10 @@ def nvfp4_kv_dequantize_pages_to_fp8(
     FP8 shadow cache. The per-tensor global scale is intentionally not applied:
     callers pass that scale to FP8 attention as ``k_scale`` or ``v_scale``.
 
-    ``num_active_pages`` is a one-element CUDA int32 tensor. Keeping the active
-    count on device makes the operation safe for CUDA graph replay without a
-    host synchronization as the context grows.
+    ``num_active_pages`` can be a one-element CUDA int32 tensor, keeping the
+    active count on device as the context grows, or ``None`` to process every
+    entry in ``page_indices``. The optional ``output_page_indices`` is populated
+    with separate source K and compact V page IDs in the same kernel launch.
 
     Parameters
     ----------
@@ -2293,8 +2298,9 @@ def nvfp4_kv_dequantize_pages_to_fp8(
         FP8 E4M3 block scales with a final dimension of ``head_dim // 16``.
     page_indices : torch.Tensor
         CUDA int32 or int64 buffer containing physical page IDs.
-    num_active_pages : torch.Tensor
-        One-element CUDA int32 tensor specifying how many page IDs are active.
+    num_active_pages : Optional[torch.Tensor]
+        One-element CUDA int32 tensor specifying how many page IDs are active,
+        or ``None`` to process every page reference.
     output : torch.Tensor
         Caller-owned FP8 E4M3 paged output with the same page, token, and head
         dimensions and twice the input's packed final dimension.
@@ -2307,6 +2313,10 @@ def nvfp4_kv_dequantize_pages_to_fp8(
         Write page reference ``i`` to output page ``i + 1`` instead of using
         the source physical page ID. In this mode, ``output.shape[0]`` must be
         ``page_indices.numel() + 1``.
+    output_page_indices : Optional[torch.Tensor]
+        Optional contiguous tensor with shape ``[batch_size, 2, pages_per_seq]``
+        and the same dtype as ``page_indices``. The first table retains source
+        K page IDs and the second maps valid V references to compact pages.
     """
     _check_kv_layout(kv_layout)
     if sf_layout not in ("linear", "swizzled_4x4"):
@@ -2326,12 +2336,30 @@ def nvfp4_kv_dequantize_pages_to_fp8(
         raise ValueError(
             f"page_indices must have dtype torch.int32 or torch.int64, got {page_indices.dtype}"
         )
-    if num_active_pages.dtype != torch.int32 or num_active_pages.numel() != 1:
+    if num_active_pages is not None and (
+        num_active_pages.dtype != torch.int32 or num_active_pages.numel() != 1
+    ):
         raise ValueError("num_active_pages must be a one-element torch.int32 tensor")
     if output.dtype != torch.float8_e4m3fn:
         raise ValueError(
             f"output must have dtype torch.float8_e4m3fn, got {output.dtype}"
         )
+    if output_page_indices is not None:
+        expected_shape = (
+            output_page_indices.ndim == 3
+            and output_page_indices.shape[1] == 2
+            and output_page_indices.shape[0] * output_page_indices.shape[2]
+            == page_indices.numel()
+        )
+        if not compact_output or not expected_shape:
+            raise ValueError(
+                "output_page_indices requires compact_output=True and shape "
+                "[batch_size, 2, pages_per_seq]"
+            )
+        if output_page_indices.dtype != page_indices.dtype:
+            raise ValueError(
+                "output_page_indices and page_indices must have the same dtype"
+            )
 
     layout_code = 0 if kv_layout == "NHD" else 1
     sf_layout_code = 0 if sf_layout == "linear" else 1
@@ -2344,6 +2372,7 @@ def nvfp4_kv_dequantize_pages_to_fp8(
         layout_code,
         sf_layout_code,
         compact_output,
+        output_page_indices,
     )
 
 
