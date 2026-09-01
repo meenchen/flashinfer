@@ -62,6 +62,17 @@ bool usesSeparateTransformedKv(KernelMeta const&, long) {
   return false;
 }
 
+template <typename KernelMeta>
+auto storesTransformedKvInTmem(KernelMeta const& kernelMeta, int)
+    -> decltype(kernelMeta.mStoreTransformedKvInTmem) {
+  return kernelMeta.mStoreTransformedKvInTmem;
+}
+
+template <typename KernelMeta>
+bool storesTransformedKvInTmem(KernelMeta const&, long) {
+  return false;
+}
+
 struct KernelParams {
   // TMA descriptor for Q.
   CUtensorMap tmaQ_;
@@ -755,9 +766,13 @@ struct KernelParams {
     // Whether store transformed K/V in TMEM.
     bool const isSwapsMmaAb =
         isSwapsMmaAbForGenerationKernel(static_cast<FmhaKernelType>(kernelMeta.mKernelType));
-    bool const storeTransformedKvInTmem{kernelMeta.mDataTypeKv == DATA_TYPE_E2M1 &&
-                                        kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
-                                        maxHeadDimKv >= 128 && isSwapsMmaAb};
+    // Older homogeneous NVFP4 packages predate the capability bit. Mixed-KV kernels must opt in:
+    // their inventory includes schedules that still consume packed V from SMEM.
+    bool const usesLegacyHomogeneousNvFp4Tmem{
+        kernelMeta.mDataTypeKv == DATA_TYPE_E2M1 &&
+        kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 && maxHeadDimKv >= 128 && isSwapsMmaAb};
+    bool const storeTransformedKvInTmem{usesLegacyHomogeneousNvFp4Tmem ||
+                                        storesTransformedKvInTmem(kernelMeta, 0)};
     // Whether swizzle is needed for K/V.
     bool const swizzleK{storeTransformedKvInTmem || !transformsK};
     bool const swizzleV{storeTransformedKvInTmem || !transformsV};
