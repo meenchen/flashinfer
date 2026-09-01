@@ -2081,12 +2081,14 @@ def test_trtllm_batch_decode_spec(
 )
 @pytest.mark.parametrize("head_dim", [128, 256])
 @pytest.mark.parametrize(
-    "head_group_size", [4, 16, 64], ids=["q8", "q16", "q16_ratio64"]
+    "head_group_size",
+    [4, 16, 64],
+    ids=["ungrouped_q8", "ungrouped_q16", "ungrouped_ratio64"],
 )
 def test_trtllm_batch_decode_fp8_k_nvfp4_v(
     pages_per_seq: int, head_dim: int, head_group_size: int
 ) -> None:
-    """Resolve and launch mixed-KV FP8-query selector targets."""
+    """Resolve and launch ungrouped mixed-KV FP8-query selector targets."""
     _skip_if_not_blackwell()
     torch.manual_seed(0)
 

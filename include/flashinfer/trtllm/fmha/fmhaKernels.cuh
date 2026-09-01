@@ -235,7 +235,7 @@ class TllmGenFmhaKernel {
   }
 
   inline bool supportsGqaGroupingTokensHeadsQ(SelectKernelParams const& selectKernelParams) const {
-    return mDtypeQ == mDtypeK ||
+    return (mDtypeQ == mDtypeK && mDtypeK == mDtypeV) ||
            (isBf16QFp8KvGeneration() &&
             selectKernelParams.mBf16QFp8KvTransformMode != Bf16QFp8KvTransformMode::Full);
   }
@@ -1120,8 +1120,8 @@ class TllmGenFmhaKernel {
     int& tileSizeQ = selectKernelParams.mTileSizeQ;
     selectKernelParams.mGroupsTokensHeadsQ = false;
 
-    // Generic mixed precision kernels don't work with groupsTokensHeadsQ = true. BF16Q+FP8KV
-    // transform paths present BF16 K to BMM1, so they can use the grouped-token cubins.
+    // Generic mixed K/V kernels don't work with groupsTokensHeadsQ = true. BF16Q+FP8KV
+    // transform paths present BF16 K and V to the MMAs, so they can use grouped-token cubins.
     if (!supportsGqaGroupingTokensHeadsQ(selectKernelParams)) {
       selectKernelParams.mGroupsTokensHeadsQ = false;
       tileSizeQ = params.mNumHeadsQPerKv <= 8 ? 8 : 16;
