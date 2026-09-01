@@ -584,7 +584,14 @@ class TllmGenFmhaKernel {
       // non-MLA H=512), and for tileSizeQ >= 32 the CGA variant also exceeds the device smem
       // limit. This guard can be narrowed once trtllm-gen ships a cubin with the
       // tileSizeQ>=32 + headDimPerCtaV>=512 skip predicate.
-      if (!isDsv3MinLatencyMode && numCtasPerSeqKv > 1 && numCtasPerSeqKv <= 16 &&
+      // SM103 cannot launch the H128 FP8-K/NVFP4-V Swaps CGA kernels: their measured
+      // shared-memory requirement exceeds the 228 KiB per-block limit. Keep the launch on the
+      // equivalent global-memory reduction path, which is exported for the same selector shape.
+      bool const supportsCgaSmemReduction =
+          !(mSM == kSM_103 && mDtypeK == DATA_TYPE_E4M3 && mDtypeV == DATA_TYPE_E2M1 &&
+            params.mHeadDimV == 128);
+      if (!isDsv3MinLatencyMode && supportsCgaSmemReduction && numCtasPerSeqKv > 1 &&
+          numCtasPerSeqKv <= 16 &&
           isSwapsMmaAbForGenerationKernel(selectKernelParams.mKernelType) &&
           isGmemReduction(selectKernelParams.mMultiCtasKvMode) &&
           !selectKernelParams.mForceGmemReduction && params.mHeadDimV < 512) {
