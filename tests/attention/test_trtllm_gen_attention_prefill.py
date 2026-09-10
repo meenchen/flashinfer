@@ -598,9 +598,7 @@ def _test_trtllm_batch_prefill(
 
     # NVFP4 KV cache has higher mismatch rate due to 4-bit quantization noise,
     # especially with outlier channels that stress per-block scaling.
-    allowed_mismatch_rate = (
-        0.10 if kv_dtype in ("nvfp4", "fp8_k_nvfp4_v") else 1e-7
-    )
+    allowed_mismatch_rate = 0.10 if kv_dtype in ("nvfp4", "fp8_k_nvfp4_v") else 1e-7
     # Calculate max allowed mismatched elements based on tensor size
     total_elements = (output.float() * o_scale).numel()
     max_mismatched_elements = int(allowed_mismatch_rate * total_elements)
@@ -866,9 +864,7 @@ def test_trtllm_batch_prefill_separate_page_pool_sizes() -> None:
     )
     seq_lens = torch.tensor([kv_len], dtype=torch.int32, device=GPU_DEVICE)
     cum_seq_lens_q = torch.tensor([0, q_len], dtype=torch.int32, device=GPU_DEVICE)
-    cum_seq_lens_kv = torch.tensor(
-        [0, kv_len], dtype=torch.int32, device=GPU_DEVICE
-    )
+    cum_seq_lens_kv = torch.tensor([0, kv_len], dtype=torch.int32, device=GPU_DEVICE)
     workspace_buffer, _ = create_workspace_buffers(GPU_DEVICE)
 
     output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
@@ -889,12 +885,8 @@ def test_trtllm_batch_prefill_separate_page_pool_sizes() -> None:
         uses_shared_paged_kv_idx=False,
     )
 
-    keys = key_cache.permute(1, 0, 2, 3).reshape(
-        num_kv_heads, kv_len, head_dim
-    )
-    values = value_cache[1:].permute(1, 0, 2, 3).reshape(
-        num_kv_heads, kv_len, head_dim
-    )
+    keys = key_cache.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_len, head_dim)
+    values = value_cache[1:].permute(1, 0, 2, 3).reshape(num_kv_heads, kv_len, head_dim)
     keys = keys.repeat_interleave(num_qo_heads // num_kv_heads, dim=0).float()
     values = values.repeat_interleave(num_qo_heads // num_kv_heads, dim=0).float()
     logits = torch.einsum("qhd,hnd->qhn", query.float(), keys) * head_dim**-0.5

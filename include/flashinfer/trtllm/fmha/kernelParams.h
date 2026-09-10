@@ -748,11 +748,9 @@ struct KernelParams {
         getNumEltsInClampedHeadDim(kernelMeta.mDataTypeV, options.mHeadDimV);
 
     // Determine the operand dtypes presented to BMM1 and BMM2.
-    Data_type dtypeBmm2 = kernelMeta.mDataTypeK != kernelMeta.mDataTypeQ
-                              ? kernelMeta.mDataTypeQ
-                              : kernelMeta.mDataTypeV;
-    if (kernelMeta.mDataTypeK == DATA_TYPE_E4M3 &&
-        kernelMeta.mDataTypeV == DATA_TYPE_E2M1) {
+    Data_type dtypeBmm2 = kernelMeta.mDataTypeK != kernelMeta.mDataTypeQ ? kernelMeta.mDataTypeQ
+                                                                         : kernelMeta.mDataTypeV;
+    if (kernelMeta.mDataTypeK == DATA_TYPE_E4M3 && kernelMeta.mDataTypeV == DATA_TYPE_E2M1) {
       dtypeBmm2 = DATA_TYPE_E4M3;
     }
     if (enablesBf16QFp8KvKOnlyTransform(kernelMeta, 0)) {
@@ -768,16 +766,17 @@ struct KernelParams {
         isSwapsMmaAbForGenerationKernel(static_cast<FmhaKernelType>(kernelMeta.mKernelType));
     // Older homogeneous NVFP4 packages predate the capability bit. Mixed-KV kernels must opt in:
     // their inventory includes schedules that still consume packed V from SMEM.
-    bool const usesLegacyHomogeneousNvFp4Tmem{
-        kernelMeta.mDataTypeKv == DATA_TYPE_E2M1 &&
-        kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 && maxHeadDimKv >= 128 && isSwapsMmaAb};
+    bool const usesLegacyHomogeneousNvFp4Tmem{kernelMeta.mDataTypeKv == DATA_TYPE_E2M1 &&
+                                              kernelMeta.mDataTypeQ == DATA_TYPE_E4M3 &&
+                                              maxHeadDimKv >= 128 && isSwapsMmaAb};
     bool const storeTransformedKvInTmem{usesLegacyHomogeneousNvFp4Tmem ||
                                         storesTransformedKvInTmem(kernelMeta, 0)};
     // Whether swizzle is needed for K/V.
     bool const swizzleK{storeTransformedKvInTmem || !transformsK};
     bool const swizzleV{storeTransformedKvInTmem || !transformsV};
-    bool const separateSmemKv{kernelMeta.mDataTypeK != kernelMeta.mDataTypeV ||
-                              transformsK != transformsV};
+    bool const separateSmemKv{
+        (kernelMeta.mDataTypeK == DATA_TYPE_E4M3 && kernelMeta.mDataTypeV == DATA_TYPE_E2M1) ||
+        transformsK != transformsV};
     // Whether we can reshape the TMA box for K/V to widen it to 128B.
     bool const canReshapeTmaKv{isPagedKv(options.mQkvLayout) &&
                                options.mHeadDimQk == options.mHeadDimV && !swizzleK && !swizzleV &&

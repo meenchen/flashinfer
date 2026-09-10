@@ -36,52 +36,48 @@ __device__ __constant__ float E2M1_LUT[16] = {0.0f,  0.5f,  1.0f,  1.5f,  2.0f, 
                                               4.0f,  6.0f,  -0.0f, -0.5f, -1.0f, -1.5f,
                                               -2.0f, -3.0f, -4.0f, -6.0f};
 
-__device__ __forceinline__ uint4 dequant_nvfp4x16_to_fp8(uint64_t packed_fp4,
-                                                          uint8_t scale_fp8) {
+__device__ __forceinline__ uint4 dequant_nvfp4x16_to_fp8(uint64_t packed_fp4, uint8_t scale_fp8) {
   uint4 output;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
   const uint16_t scale_fp8x2 = static_cast<uint16_t>(scale_fp8) * 0x101u;
   uint32_t scale_fp16x2;
-  asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;"
-               : "=r"(scale_fp16x2)
-               : "h"(scale_fp8x2));
+  asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(scale_fp16x2) : "h"(scale_fp8x2));
 
   const uint32_t* packed_words = reinterpret_cast<const uint32_t*>(&packed_fp4);
   uint32_t* output_words = reinterpret_cast<uint32_t*>(&output);
 #pragma unroll
   for (int word = 0; word < 2; ++word) {
-    asm volatile("{\n"
-                 ".reg .b8 b0, b1, b2, b3;\n"
-                 ".reg .b32 h0, h1, h2, h3;\n"
-                 ".reg .b16 e0, e1, e2, e3;\n"
-                 "mov.b32 {b0, b1, b2, b3}, %2;\n"
-                 "cvt.rn.f16x2.e2m1x2 h0, b0;\n"
-                 "cvt.rn.f16x2.e2m1x2 h1, b1;\n"
-                 "cvt.rn.f16x2.e2m1x2 h2, b2;\n"
-                 "cvt.rn.f16x2.e2m1x2 h3, b3;\n"
-                 "mul.rn.f16x2 h0, h0, %3;\n"
-                 "mul.rn.f16x2 h1, h1, %3;\n"
-                 "mul.rn.f16x2 h2, h2, %3;\n"
-                 "mul.rn.f16x2 h3, h3, %3;\n"
-                 "cvt.rn.satfinite.e4m3x2.f16x2 e0, h0;\n"
-                 "cvt.rn.satfinite.e4m3x2.f16x2 e1, h1;\n"
-                 "cvt.rn.satfinite.e4m3x2.f16x2 e2, h2;\n"
-                 "cvt.rn.satfinite.e4m3x2.f16x2 e3, h3;\n"
-                 "mov.b32 %0, {e0, e1};\n"
-                 "mov.b32 %1, {e2, e3};\n"
-                 "}\n"
-                 : "=r"(output_words[word * 2]), "=r"(output_words[word * 2 + 1])
-                 : "r"(packed_words[word]), "r"(scale_fp16x2));
+    asm volatile(
+        "{\n"
+        ".reg .b8 b0, b1, b2, b3;\n"
+        ".reg .b32 h0, h1, h2, h3;\n"
+        ".reg .b16 e0, e1, e2, e3;\n"
+        "mov.b32 {b0, b1, b2, b3}, %2;\n"
+        "cvt.rn.f16x2.e2m1x2 h0, b0;\n"
+        "cvt.rn.f16x2.e2m1x2 h1, b1;\n"
+        "cvt.rn.f16x2.e2m1x2 h2, b2;\n"
+        "cvt.rn.f16x2.e2m1x2 h3, b3;\n"
+        "mul.rn.f16x2 h0, h0, %3;\n"
+        "mul.rn.f16x2 h1, h1, %3;\n"
+        "mul.rn.f16x2 h2, h2, %3;\n"
+        "mul.rn.f16x2 h3, h3, %3;\n"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e0, h0;\n"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e1, h1;\n"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e2, h2;\n"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e3, h3;\n"
+        "mov.b32 %0, {e0, e1};\n"
+        "mov.b32 %1, {e2, e3};\n"
+        "}\n"
+        : "=r"(output_words[word * 2]), "=r"(output_words[word * 2 + 1])
+        : "r"(packed_words[word]), "r"(scale_fp16x2));
   }
 #else
   uint8_t* output_bytes = reinterpret_cast<uint8_t*>(&output);
-  const float scale =
-      static_cast<float>(*reinterpret_cast<const __nv_fp8_e4m3*>(&scale_fp8));
+  const float scale = static_cast<float>(*reinterpret_cast<const __nv_fp8_e4m3*>(&scale_fp8));
 #pragma unroll
   for (int index = 0; index < NVFP4_BLOCK_SIZE; ++index) {
     const uint8_t fp4 = (packed_fp4 >> (index * 4)) & 0xF;
-    output_bytes[index] =
-        __nv_cvt_float_to_fp8(E2M1_LUT[fp4] * scale, __NV_SATFINITE, __NV_E4M3);
+    output_bytes[index] = __nv_cvt_float_to_fp8(E2M1_LUT[fp4] * scale, __NV_SATFINITE, __NV_E4M3);
   }
 #endif
   return output;
@@ -243,20 +239,16 @@ __global__ void nvfp4_pages_to_fp8_kernel(
     const uint8_t* __restrict__ paged_cache, const uint8_t* __restrict__ paged_scales,
     const IdType* __restrict__ page_indices, const int32_t* __restrict__ num_active_pages,
     uint8_t* __restrict__ output, IdType* __restrict__ output_page_indices,
-    const int num_pages_per_seq, const int64_t page_indices_stride,
-    const int max_page_indices, const int num_pages, const int page_size,
-    const int num_heads, const int head_dim,
-    const int64_t cache_stride_page, const int64_t cache_stride_n,
-    const int64_t cache_stride_h, const int64_t scale_stride_page,
-    const int64_t scale_stride_n, const int64_t scale_stride_h,
-    const int64_t output_stride_page, const int64_t output_stride_n,
-    const int64_t output_stride_h, const bool swizzled_scales,
-    const bool compact_output) {
+    const int num_pages_per_seq, const int64_t page_indices_stride, const int max_page_indices,
+    const int num_pages, const int page_size, const int num_heads, const int head_dim,
+    const int64_t cache_stride_page, const int64_t cache_stride_n, const int64_t cache_stride_h,
+    const int64_t scale_stride_page, const int64_t scale_stride_n, const int64_t scale_stride_h,
+    const int64_t output_stride_page, const int64_t output_stride_n, const int64_t output_stride_h,
+    const bool swizzled_scales, const bool compact_output) {
   const int scale_dim = head_dim / NVFP4_BLOCK_SIZE;
   const int scale_groups_per_page_head = page_size * scale_dim;
-  const int active_pages = num_active_pages == nullptr
-                               ? max_page_indices
-                               : min(*num_active_pages, max_page_indices);
+  const int active_pages =
+      num_active_pages == nullptr ? max_page_indices : min(*num_active_pages, max_page_indices);
   constexpr int PACKED_PER_SCALE = NVFP4_BLOCK_SIZE / 2;
 
   // A fixed launch grid keeps this operation CUDA-graph replayable while the
@@ -267,8 +259,8 @@ __global__ void nvfp4_pages_to_fp8_kernel(
     const int head = page_head_pos % num_heads;
     const int batch = page_pos / num_pages_per_seq;
     const int page_in_seq = page_pos - batch * num_pages_per_seq;
-    const IdType page = page_indices[static_cast<int64_t>(batch) * page_indices_stride +
-                                     page_in_seq];
+    const IdType page =
+        page_indices[static_cast<int64_t>(batch) * page_indices_stride + page_in_seq];
     const bool valid_page = page >= 0 && page < num_pages;
     if (output_page_indices != nullptr && head == 0 && threadIdx.x == 0) {
       const int table_offset = batch * 2 * num_pages_per_seq + page_in_seq;
@@ -279,8 +271,7 @@ __global__ void nvfp4_pages_to_fp8_kernel(
     if (!valid_page) continue;
 
     const int output_page = compact_output ? page_pos + 1 : page;
-    for (int linear = threadIdx.x; linear < scale_groups_per_page_head;
-         linear += blockDim.x) {
+    for (int linear = threadIdx.x; linear < scale_groups_per_page_head; linear += blockDim.x) {
       const int scale_idx = linear % scale_dim;
       const int token = linear / scale_dim;
 
@@ -303,10 +294,9 @@ __global__ void nvfp4_pages_to_fp8_kernel(
       const uint64_t packed_fp4 = *reinterpret_cast<const uint64_t*>(paged_cache + cache_offset);
       const uint4 dequantized = dequant_nvfp4x16_to_fp8(packed_fp4, scale_fp8);
       const int col = packed_col * 2;
-      const int64_t output_offset =
-          static_cast<int64_t>(output_page) * output_stride_page +
-          static_cast<int64_t>(token) * output_stride_n +
-          static_cast<int64_t>(head) * output_stride_h + col;
+      const int64_t output_offset = static_cast<int64_t>(output_page) * output_stride_page +
+                                    static_cast<int64_t>(token) * output_stride_n +
+                                    static_cast<int64_t>(head) * output_stride_h + col;
       *reinterpret_cast<uint4*>(output + output_offset) = dequantized;
     }
   }
@@ -541,9 +531,8 @@ void nvfp4_paged_kv_dequant(TensorView paged_k_cache, TensorView paged_v_cache, 
 
 void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_scales,
                                       TensorView page_indices,
-                                      Optional<TensorView> num_active_pages,
-                                      TensorView output, int64_t kv_layout,
-                                      int64_t sf_layout, bool compact_output,
+                                      Optional<TensorView> num_active_pages, TensorView output,
+                                      int64_t kv_layout, int64_t sf_layout, bool compact_output,
                                       Optional<TensorView> output_page_indices) {
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(paged_cache);
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(paged_scales);
@@ -565,8 +554,7 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
     CHECK_INPUT(active_pages);
     TVM_FFI_ICHECK(active_pages.ndim() == 1 && active_pages.numel() == 1)
         << "num_active_pages must be a one-element tensor";
-    TVM_FFI_ICHECK(active_pages.dtype() == dl_int32)
-        << "num_active_pages must have dtype int32";
+    TVM_FFI_ICHECK(active_pages.dtype() == dl_int32) << "num_active_pages must have dtype int32";
     CHECK_DEVICE(paged_cache, active_pages);
   }
 
@@ -575,8 +563,7 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
       << "paged_scales must have dtype float8_e4m3fn or uint8";
   TVM_FFI_ICHECK(page_indices.dtype() == dl_int32 || page_indices.dtype() == dl_int64)
       << "page_indices must have dtype int32 or int64";
-  TVM_FFI_ICHECK(output.dtype() == dl_float8_e4m3fn)
-      << "output must have dtype float8_e4m3fn";
+  TVM_FFI_ICHECK(output.dtype() == dl_float8_e4m3fn) << "output must have dtype float8_e4m3fn";
 
   const int num_pages = paged_cache.size(0);
   const int page_size = kv_layout == 0 ? paged_cache.size(1) : paged_cache.size(2);
@@ -589,8 +576,7 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
       << "head_dim must be divisible by " << NVFP4_BLOCK_SIZE;
   TVM_FFI_ICHECK(sf_layout == 0 || (page_size % 4 == 0 && scale_dim % 4 == 0))
       << "swizzled_4x4 scales require page_size and scale_dim divisible by 4";
-  const int64_t expected_output_pages =
-      compact_output ? page_indices.numel() + 1 : num_pages;
+  const int64_t expected_output_pages = compact_output ? page_indices.numel() + 1 : num_pages;
   TVM_FFI_ICHECK(output.size(0) == expected_output_pages) << "output page count mismatch";
   TVM_FFI_ICHECK(output.size(1) == (kv_layout == 0 ? page_size : num_heads))
       << "output dimension 1 mismatch";
@@ -604,15 +590,13 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
       << "scale dimension 2 mismatch";
   TVM_FFI_ICHECK(paged_scales.size(3) == scale_dim) << "scale head_dim mismatch";
 
-  int num_pages_per_seq =
-      page_indices.ndim() == 1 ? page_indices.numel() : page_indices.size(1);
+  int num_pages_per_seq = page_indices.ndim() == 1 ? page_indices.numel() : page_indices.size(1);
   int64_t page_indices_stride =
       page_indices.ndim() == 1 ? page_indices.numel() : page_indices.strides()[0];
   if (output_page_indices.has_value()) {
     TensorView table = output_page_indices.value();
     CHECK_INPUT(table);
-    TVM_FFI_ICHECK(compact_output)
-        << "output_page_indices requires compact_output=True";
+    TVM_FFI_ICHECK(compact_output) << "output_page_indices requires compact_output=True";
     TVM_FFI_ICHECK(table.ndim() == 3 && table.size(1) == 2)
         << "output_page_indices must have shape [batch_size, 2, pages_per_seq]";
     TVM_FFI_ICHECK(table.size(0) * table.size(2) == page_indices.numel())
@@ -664,11 +648,9 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
         num_active_pages.has_value()
             ? static_cast<const int32_t*>(num_active_pages.value().data_ptr())
             : nullptr,
-        static_cast<uint8_t*>(output.data_ptr()), table_ptr, num_pages_per_seq,
-        page_indices_stride, page_indices.numel(), num_pages, page_size,
-        num_heads, head_dim,
-        cache_strides[0], cache_stride_n,
-        cache_stride_h, scale_strides[0], scale_stride_n, scale_stride_h,
+        static_cast<uint8_t*>(output.data_ptr()), table_ptr, num_pages_per_seq, page_indices_stride,
+        page_indices.numel(), num_pages, page_size, num_heads, head_dim, cache_strides[0],
+        cache_stride_n, cache_stride_h, scale_strides[0], scale_stride_n, scale_stride_h,
         output_strides[0], output_stride_n, output_stride_h, sf_layout == 1, compact_output);
     FLASHINFER_CUDA_CHECK(cudaGetLastError());
     return true;
@@ -677,5 +659,4 @@ void nvfp4_kv_dequantize_pages_to_fp8(TensorView paged_cache, TensorView paged_s
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_kv_dequant, nvfp4_kv_dequant);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_paged_kv_dequant, nvfp4_paged_kv_dequant);
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_kv_dequantize_pages_to_fp8,
-                              nvfp4_kv_dequantize_pages_to_fp8);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_kv_dequantize_pages_to_fp8, nvfp4_kv_dequantize_pages_to_fp8);

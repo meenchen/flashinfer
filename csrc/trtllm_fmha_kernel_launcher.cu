@@ -167,23 +167,22 @@ void trtllm_paged_attention_launcher(
     void* workspace_buffer, void* multi_ctas_kv_counter_buffer, int64_t multi_ctas_kv_counter_size,
     int* block_tables, const void* k_block_scales_ptr, const void* v_block_scales_ptr,
     int* seq_lens, int* cum_seq_lens_q, int* cum_seq_lens_kv, float* attention_sinks, float* lse,
-    Data_type q_data_type, Data_type k_data_type,
-    Data_type v_data_type, Data_type o_data_type, TllmPagedAttentionMode mode, int64_t batch_size,
-    int64_t max_q_len, int64_t max_kv_len, int64_t num_pages_in_mem_pool, int64_t num_qo_heads,
-    int64_t num_kv_heads, int64_t head_dim_qk, int64_t head_dim_vo, int64_t page_size,
-    int64_t q_stride_tokens, int64_t q_stride_heads, int64_t k_stride_keys_values,
-    int64_t k_stride_heads, int64_t k_stride_batch, int64_t v_stride_keys_values,
-    int64_t v_stride_heads, int64_t v_stride_batch, int64_t max_num_blocks_per_seq,
-    double bmm1_scale, double bmm2_scale, const float* bmm1_scale_log2_ptr,
-    const float* bmm2_scale_ptr, double o_sf_scale, int64_t o_sf_vec_size, int64_t o_sf_start_index,
-    int64_t window_left, int64_t sum_seq_q, int64_t sparse_mla_top_k, void* sliding_window_kv_pool,
-    int* sparse_mla_top_k_lens, bool has_sliding_window_kv_pool,
-    float skip_softmax_threshold_scale_factor, bool skips_softmax, bool uses_shared_paged_kv_idx,
-    bool enable_block_sparse_attention, int64_t sm_count, bool enable_pdl, int64_t workspace_size,
-    int64_t k_sf_stride_heads, int64_t k_sf_stride_batch, int64_t v_sf_stride_heads,
-    int64_t v_sf_stride_batch, bool is_causal, int64_t lse_stride_tokens, int64_t lse_stride_heads,
-    int64_t bf16q_fp8kv_transform_mode, bool use_fp16_softmax, bool uses_spcompress,
-    cudaStream_t stream) {
+    Data_type q_data_type, Data_type k_data_type, Data_type v_data_type, Data_type o_data_type,
+    TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len, int64_t max_kv_len,
+    int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads, int64_t head_dim_qk,
+    int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens, int64_t q_stride_heads,
+    int64_t k_stride_keys_values, int64_t k_stride_heads, int64_t k_stride_batch,
+    int64_t v_stride_keys_values, int64_t v_stride_heads, int64_t v_stride_batch,
+    int64_t max_num_blocks_per_seq, double bmm1_scale, double bmm2_scale,
+    const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
+    int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t window_left, int64_t sum_seq_q,
+    int64_t sparse_mla_top_k, void* sliding_window_kv_pool, int* sparse_mla_top_k_lens,
+    bool has_sliding_window_kv_pool, float skip_softmax_threshold_scale_factor, bool skips_softmax,
+    bool uses_shared_paged_kv_idx, bool enable_block_sparse_attention, int64_t sm_count,
+    bool enable_pdl, int64_t workspace_size, int64_t k_sf_stride_heads, int64_t k_sf_stride_batch,
+    int64_t v_sf_stride_heads, int64_t v_sf_stride_batch, bool is_causal, int64_t lse_stride_tokens,
+    int64_t lse_stride_heads, int64_t bf16q_fp8kv_transform_mode, bool use_fp16_softmax,
+    bool uses_spcompress, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -200,8 +199,8 @@ void trtllm_paged_attention_launcher(
   if (transform_mode != Bf16QFp8KvTransformMode::Full) {
     TVM_FFI_ICHECK(
         mode == TllmPagedAttentionMode::ForGen && q_data_type == Data_type::DATA_TYPE_BF16 &&
-        k_data_type == Data_type::DATA_TYPE_E4M3 &&
-        v_data_type == Data_type::DATA_TYPE_E4M3 && o_data_type == Data_type::DATA_TYPE_BF16)
+        k_data_type == Data_type::DATA_TYPE_E4M3 && v_data_type == Data_type::DATA_TYPE_E4M3 &&
+        o_data_type == Data_type::DATA_TYPE_BF16)
         << "bf16q_fp8kv_transform_mode is only supported for BF16 query, FP8 E4M3 KV, "
            "BF16 output decode";
   }
@@ -303,8 +302,8 @@ void trtllm_paged_attention_launcher(
     runner_params.mMaskType =
         is_causal ? TrtllmGenAttentionMaskType::Causal : TrtllmGenAttentionMaskType::Dense;
     runner_params.mKernelType = FmhaKernelType::Context;
-    bool const is_fp8_k_nvfp4_v = k_data_type == Data_type::DATA_TYPE_E4M3 &&
-                                  v_data_type == Data_type::DATA_TYPE_E2M1;
+    bool const is_fp8_k_nvfp4_v =
+        k_data_type == Data_type::DATA_TYPE_E4M3 && v_data_type == Data_type::DATA_TYPE_E2M1;
     runner_params.mTileScheduler =
         is_fp8_k_nvfp4_v ? TileScheduler::Static : TileScheduler::Persistent;
     runner_params.mMultiCtasKvMode = false;
@@ -648,8 +647,7 @@ void trtllm_paged_attention_context(
   int max_num_blocks_per_seq = block_tables.size(-1);
   bool is_shared_kv = key_cache.data_ptr() == value_cache.data_ptr();
   int num_pages_in_mem_pool =
-      is_shared_kv ? key_cache.size(0)
-                   : std::max(key_cache.size(0), value_cache.size(0)) * 2;
+      is_shared_kv ? key_cache.size(0) : std::max(key_cache.size(0), value_cache.size(0)) * 2;
   bool const is_fp4_k = is_4bit(k_data_type);
   bool const is_fp4_v = is_4bit(v_data_type);
   int const k_stride_idx_factor = is_fp4_k ? 2 : 1;

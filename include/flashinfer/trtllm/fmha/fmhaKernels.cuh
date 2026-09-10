@@ -692,9 +692,8 @@ class TllmGenFmhaKernel {
       // SM103 cannot launch the H128 FP8-K/NVFP4-V Swaps CGA kernels: their measured
       // shared-memory requirement exceeds the 228 KiB per-block limit. Keep the launch on the
       // equivalent global-memory reduction path, which is exported for the same selector shape.
-      bool const supportsCgaSmemReduction =
-          !(mSM == kSM_103 && mDtypeK == DATA_TYPE_E4M3 && mDtypeV == DATA_TYPE_E2M1 &&
-            params.mHeadDimV == 128);
+      bool const supportsCgaSmemReduction = !(mSM == kSM_103 && mDtypeK == DATA_TYPE_E4M3 &&
+                                              mDtypeV == DATA_TYPE_E2M1 && params.mHeadDimV == 128);
       if (useCgaSmemReduction && supportsCgaSmemReduction && numCtasPerSeqKv > 1 &&
           numCtasPerSeqKv <= 16 &&
           isSwapsMmaAbForGenerationKernel(selectKernelParams.mKernelType) &&
