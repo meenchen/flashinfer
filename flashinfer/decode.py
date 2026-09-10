@@ -3514,7 +3514,7 @@ def trtllm_batch_decode_with_kv_cache(
             raise ValueError(
                 "DCP speculative decode currently requires kv_layout='HND'"
             )
-        if is_nvfp4_kvcache or kv_cache_sf is not None:
+        if is_nvfp4_k_cache or is_nvfp4_v_cache or kv_cache_sf is not None:
             raise ValueError(
                 "DCP speculative decode supports BF16 or FP8 e4m3 KV cache, "
                 "but not NVFP4 or block scale tensors"

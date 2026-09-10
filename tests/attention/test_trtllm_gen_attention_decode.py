@@ -2074,6 +2074,28 @@ def test_trtllm_batch_decode_spec(
     )
 
 
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_trtllm_decode_dcp_homogeneous_validation(kv_dtype: torch.dtype) -> None:
+    """Homogeneous DCP must reach its validation after mixed-KV dispatch."""
+    _skip_if_not_blackwell()
+    query = torch.empty(1, 4, 128, device=GPU_DEVICE, dtype=torch.bfloat16)
+    cache = torch.empty(1, 1, 64, 128, device=GPU_DEVICE, dtype=kv_dtype)
+    seq_lens = torch.ones(1, device=GPU_DEVICE, dtype=torch.int32)
+    with pytest.raises(ValueError, match="requires uniform q_len_per_req"):
+        flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            query,
+            (cache, cache),
+            torch.empty(1, device=GPU_DEVICE, dtype=torch.uint8),
+            torch.zeros(1, 1, device=GPU_DEVICE, dtype=torch.int32),
+            seq_lens,
+            1,
+            kv_layout="HND",
+            enable_pdl=False,
+            causal_seqlens_kv_global=seq_lens,
+            q_len_per_req=None,
+        )
+
+
 @pytest.mark.parametrize(
     "pages_per_seq",
     [2, 8, 128],
@@ -2181,6 +2203,28 @@ def test_trtllm_batch_decode_fp8_k_nvfp4_v(
         output.float().reshape(-1), output_ref.reshape(-1), dim=0
     )
     assert cosine.item() > 0.97
+
+    graph_output = torch.empty_like(output)
+    bmm1_scale = query_scale * float(key_scale.item()) / math.sqrt(head_dim)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            query_input,
+            (key_fp8, value_fp4),
+            workspace,
+            block_tables,
+            seq_lens,
+            max_seq_len,
+            bmm1_scale=bmm1_scale,
+            bmm2_scale=value_scale,
+            out=graph_output,
+            backend="trtllm-gen",
+            kv_layout="HND",
+            kv_cache_sf=(None, value_block_scales),
+        )
+    for _ in range(2):
+        graph.replay()
+        torch.testing.assert_close(graph_output, output, atol=0, rtol=0)
 
     with pytest.raises(ValueError, match="q_len_per_req=1"):
         flashinfer.decode.trtllm_batch_decode_with_kv_cache(
